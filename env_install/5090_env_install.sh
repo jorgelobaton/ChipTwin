@@ -15,6 +15,7 @@ pip install wandb
 pip install moviepy imageio
 conda install -y opencv
 pip install cma
+pip install einops
 
 # Install the env for realsense camera
 pip install Cython
@@ -43,6 +44,7 @@ python setup.py build_ext --inplace
 pip install -e .
 cd ../simple-knn/
 pip install -e .
+touch simple_knn/__init__.py
 cd ../../../
 
 pip install plyfile

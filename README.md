@@ -94,6 +94,45 @@ bash ./env_install/env_install.sh
 bash ./env_install/download_pretrained_models.sh
 ```
 
+### Environment notes (TRELLIS and build-time packages)
+
+Some TRELLIS subcomponents (flash-attn, diffoctreerast, mip-splatting / diff-gaussian-rasterization, etc.) require building Python/CUDA extensions that declare `torch` as a build dependency. Pip uses an isolated build environment by default which may not include the already-installed `torch` from your conda env. If you hit errors like "ModuleNotFoundError: No module named 'torch'" during the TRELLIS setup, follow these steps:
+
+1. Activate the `phystwin` conda environment and run TRELLIS setup so the build steps can see the installed torch:
+
+```bash
+source /home/leo/miniforge3/etc/profile.d/conda.sh
+conda activate phystwin
+cd data_process/TRELLIS
+export PIP_NO_BUILD_ISOLATION=1
+bash ./setup.sh --basic --xformers --flash-attn --diffoctreerast --spconv --mipgaussian --kaolin --nvdiffrast
+unset PIP_NO_BUILD_ISOLATION
+```
+
+2. If a particular subcomponent still fails during the "Getting requirements to build wheel" step, install that component manually with pip using `--no-build-isolation` so the build uses the active environment's packages (notably `torch`). Examples:
+
+```bash
+# flash-attn (try first from PyPI)
+pip install --no-build-isolation flash-attn
+
+# diffoctreerast (clone+install if setup script failed to build it)
+git clone --recurse-submodules https://github.com/JeffreyXiang/diffoctreerast.git /tmp/diffoctreerast
+pip install --no-build-isolation /tmp/diffoctreerast
+
+# diff-gaussian-rasterization (used by mip-splatting)
+git clone https://github.com/autonomousvision/mip-splatting.git /tmp/mip-splatting
+pip install --no-build-isolation /tmp/mip-splatting/submodules/diff-gaussian-rasterization/
+```
+
+3. If you are on a driver-less CI or a headless machine where torch cannot detect CUDA, the installer may export a safe fallback `TORCH_CUDA_ARCH_LIST`. If you have a GPU and drivers installed, consider removing or adjusting that list to match your GPU compute capability.
+
+4. Alternative approaches (safer for reproducibility):
+  - Install prebuilt wheels for these components when available (matching your CUDA and PyTorch versions).
+  - Use conda packages if the project provides them.
+
+These notes are intended to help you re-run the TRELLIS setup and recover from common build-time failures encountered when building CUDA/PyTorch extensions locally.
+
+
 #### 🪟Windows Setup
 Thanks to @GuangyanCai contributions, now we also have a windows setup codebase in `windows_setup` branch.
 
