@@ -21,8 +21,16 @@ args = parser.parse_args()
 base_path = args.base_path
 case_name = args.case_name
 
-num_cam = 3
-assert len(glob.glob(f"{base_path}/{case_name}/depth/*")) == num_cam
+# Dynamically determine valid camera folders
+camera_folders = glob.glob(f"{base_path}/{case_name}/depth/*")
+valid_cameras = [f for f in camera_folders if os.path.isdir(f)]
+num_cam = len(valid_cameras)
+
+if num_cam == 0:
+    raise ValueError(f"No depth folders found in {base_path}/{case_name}/depth/")
+
+# assert len(glob.glob(f"{base_path}/{case_name}/depth/*")) == num_cam
+print(f"Detected {num_cam} cameras.")
 device = "cuda"
 
 

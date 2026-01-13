@@ -82,7 +82,7 @@ if PROCESS_SEG:
     # Get the masks of the controller and the object using GroundedSAM2
     with Timer("Video Segmentation"):
         os.system(
-            f"python ./data_process/segment.py --base_path {base_path} --case_name {case_name} --TEXT_PROMPT {TEXT_PROMPT}"
+            f"python ./data_process/segment.py --base_path {base_path} --case_name {case_name} --TEXT_PROMPT '{TEXT_PROMPT}'"
         )
 
 
@@ -109,7 +109,7 @@ if PROCESS_SHAPE_PRIOR and SHAPE_PRIOR:
     # Get the masked image of the object
     with Timer("Image Segmentation"):
         os.system(
-            f"python ./data_process/segment_util_image.py --img_path {base_path}/{case_name}/shape/high_resolution.png --TEXT_PROMPT {category} --output_path {base_path}/{case_name}/shape/masked_image.png"
+            f"python ./data_process/segment_util_image.py --img_path {base_path}/{case_name}/shape/high_resolution.png --TEXT_PROMPT '{category}' --output_path {base_path}/{case_name}/shape/masked_image.png"
         )
 
     with Timer("Shape Prior Generation"):

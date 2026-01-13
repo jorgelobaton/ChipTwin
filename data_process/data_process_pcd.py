@@ -9,6 +9,7 @@ import cv2
 from tqdm import tqdm
 import os
 from argparse import ArgumentParser
+import glob
 
 parser = ArgumentParser()
 parser.add_argument(
@@ -159,7 +160,16 @@ if __name__ == "__main__":
         data = json.load(f)
     intrinsics = np.array(data["intrinsics"])
     WH = data["WH"]
-    frame_num = data["frame_num"]
+    
+    # Infer frame count if not present in metadata
+    if "frame_num" in data:
+        frame_num = data["frame_num"]
+    else:
+        # Check first camera depth folder to count frames
+        depth_files = glob.glob(f"{base_path}/{case_name}/depth/0/*.npy")
+        frame_num = len(depth_files)
+        print(f"Metadata missing 'frame_num'. Inferred {frame_num} frames from camera 0.")
+
     print(data["serial_numbers"])
 
     num_cam = len(intrinsics)
