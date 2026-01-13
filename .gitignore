@@ -1,4 +1,6 @@
+*.mp4
 test.py
+demo/
 wandb/
 experiments/
 past_exps/
