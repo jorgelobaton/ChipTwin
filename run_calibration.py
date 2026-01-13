@@ -41,7 +41,7 @@ def main():
     cam_sys = CameraSystem(
         realsense_config={"WH": [848, 480], "fps": 30, "serials": rs_serials},
         d405_config={"WH": [1280, 720], "fps": 30, "serials": d405_serials},
-        kinect_config={"mode": "WFOV_BINNED", "fps": 30, "indices": k_indices},
+        kinect_config={"mode": "WFOV_BINNED", "fps": 30, "indices": k_indices, "WH": [1280, 720]},
         exposure=10000
     )
 
