@@ -35,6 +35,8 @@ This repository contains the official implementation of the **PhysTwin** framewo
 
 - **Actively Developing:** In the long term, we aim to develop a comprehensive physics simulator focused on real-to-sim, serving as an easy-to-use platform for XR, VR, and robotics applications. **Feel free to reach out via email if you’re also interested in this direction and would like to collaborate on related research projects.**
 
+- **[26.1.21] Add Web Visualization for Headless Server Runs:** Thanks to @CAN-Lee, The interactive playground is now supported through Gradio, enabling web-based interaction even when running on a server without a display. See below for more details.
+
 - **[25.11.6] Extend PhysTwin wiht robot physics support:** Explore our extended system [Real2Sim-Eval](https://real2sim-eval.github.io/), which supports both keyboard and Gello-based robot control, enabling physics-based interactions with constructed PhysTwins. We are actively developing a full robotics simulator that will serve as an easy-to-use platform for diverse research applications. A demo version will also be released in this repository soon.
 
 - **[25.10.26] Speed Acceleration for Self-Collision Cases:** For scenarios involving self-collision, instead of checking all particle pairs within a distance threshold, we introduce a mechanism to ignore topologically adjacent particle pairs. This significantly accelerates both optimization and inference in cloth-like cases where self-collision is activated. The main modification is implemented in [code](https://github.com/Jianghanxiao/PhysTwin/blob/release_collision_accelerate/qqtt/engine/trainer_warp.py#L179),and the feature is available in the branch `release_collision_accelerate`. This is a pre-released feature developed as part of an ongoing project. The fully accelerated system will be released once the complete system is done.
@@ -250,6 +252,26 @@ git checkout claw_machine
 # Play with the examples
 python interactive_playground.py --n_ctrl_parts 1 --case_name single_push_rope_1 --n_dup 4
 python interactive_playground.py --n_ctrl_parts 2 --case_name double_stretch_sloth --n_dup 2
+```
+
+### Web-based Visualization for headless-server
+This feature is contributed by @CAN-Lee—many thanks to the community for the effort (Pull Request #43).
+
+![TEASER](./assets/gradio_support.png)
+
+Try the experimental features for setting up an interactive playground on a server and accessing it through a web browser.
+
+```
+# The stuff is deployed in the `gradio_playground` branch
+git pull
+git checkout gradio_playground
+
+python interactive_playground_gradio.py \
+     --case_name double_lift_cloth_3 \
+     --n_ctrl_parts 2  \
+     --inv_ctrl \
+     --server_port 7860 \
+     --share
 ```
 
 ### Follow-up and Potential Collaborations  
