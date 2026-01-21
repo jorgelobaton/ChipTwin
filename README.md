@@ -257,7 +257,7 @@ python interactive_playground.py --n_ctrl_parts 2 --case_name double_stretch_slo
 ### Web-based Visualization for headless-server
 This feature is contributed by @CAN-Lee—many thanks to the community for the effort (Pull Request #43).
 
-![TEASER](./assets/gradio_support.png)
+![Gradio_support](./assets/gradio_support.png)
 
 Try the experimental features for setting up an interactive playground on a server and accessing it through a web browser.
 
