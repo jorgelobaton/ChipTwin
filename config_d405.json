@@ -1,0 +1,30 @@
+{
+    "WH": [
+        1280,
+        720
+    ],
+    "fps": 30,
+    "preset_id": 1,
+    "exposure": 5000,
+    "gain": 24,
+    "visual_scale": 10,
+    "min_dist": 0.07,
+    "max_dist": 0.50,
+    "depth_scale": 0.0001,
+    "disparity_transform": 1,
+    "history_fill": 1,
+    "history_decay": 5,
+    "spatial_filter": {
+        "enable": 1,
+        "magnitude": 1,
+        "alpha": 0.6,
+        "delta": 1,
+        "holes_fill": 1
+    },
+    "temporal_filter": {
+        "enable": 1,
+        "alpha": 0.2,
+        "delta": 1,
+        "persistence": 1
+    }
+}

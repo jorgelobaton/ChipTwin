@@ -1,0 +1,16 @@
+{
+    "WH": [
+        1280,
+        720
+    ],
+    "fps": 30,
+    "depth_mode": "WFOV_BINNED",
+    "color_resolution": "RES_720P",
+    "exposure": 5000,
+    "gain": 16,
+    "visual_scale": 45,
+    "min_dist": 0.25,
+    "max_dist": 0.6,
+    "history_fill": 1,
+    "history_decay": 5
+}
