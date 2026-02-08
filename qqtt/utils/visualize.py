@@ -133,7 +133,16 @@ def visualize_pc(
             if cfg.overlay_path is not None:
                 # Get the mask where the pixel is white
                 mask = np.all(frame == [255, 255, 255], axis=-1)
-                image_path = f"{cfg.overlay_path}/{vis_cam_idx}/{i}.png"
+                
+                # Resolve Camera ID (folder name)
+                cam_name = vis_cam_idx
+                if hasattr(cfg, 'camera_ids') and cfg.camera_ids:
+                    try:
+                        cam_name = cfg.camera_ids[vis_cam_idx]
+                    except IndexError:
+                        pass # Fallback to index if something is wrong
+                
+                image_path = f"{cfg.overlay_path}/{cam_name}/{i}.png"
                 overlay = cv2.imread(image_path)
                 overlay = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
                 frame[mask] = overlay[mask]

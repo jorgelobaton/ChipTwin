@@ -1,7 +1,9 @@
 import pickle
 import numpy as np
+import os
 
-with open("calibrate.pkl", "rb") as f:
+
+with open(os.path.join("..", "calibrate.pkl"), "rb") as f:
     data = pickle.load(f)
     
 for cam_id, matrix in data.items():

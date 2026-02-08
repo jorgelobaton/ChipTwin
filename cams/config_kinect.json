@@ -6,11 +6,17 @@
     "fps": 30,
     "depth_mode": "WFOV_BINNED",
     "color_resolution": "RES_720P",
+    "crop_square": 1,
     "exposure": 5000,
     "gain": 16,
     "visual_scale": 45,
     "min_dist": 0.25,
-    "max_dist": 0.6,
-    "history_fill": 1,
-    "history_decay": 5
+    "max_dist": 0.45,
+    "depth_scale": 0.001,
+    "spatial_filter": 0,
+    "spatial_sigma": 0,
+    "hole_filling": 0,
+    "history_fill": 0,
+    "history_decay": 0,
+    "edge_threshold": 250
 }
