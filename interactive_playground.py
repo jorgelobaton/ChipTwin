@@ -37,6 +37,11 @@ if __name__ == "__main__":
         default="./gaussian_output",
     )
     parser.add_argument(
+        "--no_gaussian_rendering",
+        action="store_true",
+        help="run interactive playground without gaussian rendering",
+    )
+    parser.add_argument(
         "--bg_img_path",
         type=str,
         default="./data/bg.png",
@@ -48,6 +53,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--virtual_key_input", action="store_true", help="use virtual key input"
+    )
+    parser.add_argument(
+        "--show_forces", action="store_true", help="visualize contact force arrows in real-time"
+    )
+    parser.add_argument(
+        "--force_scale", type=float, default=30000, help="scale factor for force arrow visualization"
     )
     args = parser.parse_args()
 
@@ -83,8 +94,16 @@ if __name__ == "__main__":
     cfg.WH = data["WH"]
     cfg.bg_img_path = args.bg_img_path
 
-    exp_name = "init=hybrid_iso=True_ldepth=0.001_lnormal=0.0_laniso_0.0_lseg=1.0"
-    gaussians_path = f"{args.gaussian_path}/{case_name}/{exp_name}/point_cloud/iteration_10000/point_cloud.ply"
+    gaussians_path = None
+    if not args.no_gaussian_rendering:
+        exp_name = "init=hybrid_iso=True_ldepth=0.001_lnormal=0.0_laniso_0.0_lseg=1.0"
+        gs_base = f"{args.gaussian_path}/{case_name}/{exp_name}/point_cloud"
+        # Auto-detect the latest iteration
+        iter_dirs = sorted(glob.glob(f"{gs_base}/iteration_*"), key=lambda d: int(d.split("_")[-1]))
+        if iter_dirs:
+            gaussians_path = f"{iter_dirs[-1]}/point_cloud.ply"
+        else:
+            gaussians_path = f"{gs_base}/iteration_10000/point_cloud.ply"
 
     logger.set_log_file(path=base_dir, name="inference_log")
     trainer = InvPhyTrainerWarp(
@@ -100,4 +119,7 @@ if __name__ == "__main__":
         args.n_ctrl_parts,
         args.inv_ctrl,
         virtual_key_input=args.virtual_key_input,
+        use_gaussians=not args.no_gaussian_rendering,
+        show_forces=args.show_forces,
+        force_scale=args.force_scale,
     )

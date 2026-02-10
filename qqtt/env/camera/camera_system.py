@@ -1,4 +1,5 @@
-from .realsense import MultiRealsense, SingleRealsense
+from .realsense import SingleRealsense 
+from .single_kinect import SingleKinect
 from multiprocessing.managers import SharedMemoryManager
 import numpy as np
 import time
@@ -8,450 +9,474 @@ import json
 import os
 import pickle
 
-
-# --- PyK4A Imports ---
-try:
-    import pyk4a
-    from pyk4a import Config, PyK4A, ColorResolution, DepthMode, FPS, CalibrationType, K4AException, K4ATimeoutException
-    _kinect_available = True
-except ImportError:
-    print("Warning: 'pyk4a' not found. Azure Kinect will not work.")
-    _kinect_available = False
-
-
+# Increase print options for debugging
 np.set_printoptions(threshold=np.inf)
 np.set_printoptions(suppress=True)
-
 
 def exist_dir(dir):
     if not os.path.exists(dir):
         os.makedirs(dir)
 
-
-class AzureKinectWrapper:
+class MultiCamera:
     """
-    Wraps Azure Kinect to match the interface used by CameraSystem.
+    Backend manager that spawns specific worker processes for different camera types.
     """
-    def __init__(self, device_index, mode_str="WFOV_UNBINNED", fps=30):
-        if not _kinect_available:
-            raise ImportError("pyk4a library is missing. Install with 'pip install pyk4a'")
+    def __init__(self, rs_config, config_d405, config_kinect, shm_manager, name_mapping=None):
+        self.cameras = {}
+        self.devices_list = [] # For accessing device-specific methods like get_intrinsics()
+        self.name_mapping = name_mapping or {} # Serial -> Human-readable ID
+        self.d405_names = []
+        self.kinect_names = []
+        self.rs_names = []
 
-        self.device_index = device_index
-        self.fps = fps
-        
-        self.MODE_MAP = {
-            "NFOV_UNBINNED": DepthMode.NFOV_UNBINNED,
-            "NFOV_BINNED": DepthMode.NFOV_2X2BINNED,
-            "WFOV_BINNED": DepthMode.WFOV_2X2BINNED,
-            "WFOV_UNBINNED": DepthMode.WFOV_UNBINNED,
-            "PASSIVE_IR": DepthMode.PASSIVE_IR,
-        }
-        
-        fps_map = {5: FPS.FPS_5, 15: FPS.FPS_15, 30: FPS.FPS_30}
-        k4a_fps = fps_map.get(fps, FPS.FPS_30)
-
-        self.k4a = PyK4A(
-            Config(
-                color_resolution=ColorResolution.RES_1536P,
-                depth_mode=self.MODE_MAP.get(mode_str, DepthMode.WFOV_UNBINNED),
-                camera_fps=k4a_fps,
-                synchronized_images_only=True,
-            ),
-            device_id=device_index,
-        )
-        self.k4a.start()
-        
-        self.capture_history = []
-        self.max_history = 30
-        print(f"Azure Kinect (Index {device_index}) initialized in {mode_str}")
-
-    def get(self, k=1):
-        try:
-            capture = self.k4a.get_capture()
-        except K4ATimeoutException:
-            capture = None
-        except K4AException as e:
-            print(f"Kinect Warning: {e}")
-            capture = None
-
-        if capture is not None and capture.color is not None and capture.depth is not None:
-            # OpenCV usually expects BGR. PyK4A returns BGRA.
-            color = capture.color[:, :, :3] 
-            depth = capture.depth
+        # 1. Standard RealSense (D415/D435/D455)
+        if rs_config:
+            serials = rs_config.get("serials", [])
+            wh = rs_config.get("WH", (848, 480))
+            fps = rs_config.get("fps", 30)
+            advanced_mode_config = rs_config.get("advanced_mode_config", None)
+            if advanced_mode_config is None and "parameters" in rs_config:
+                advanced_mode_config = rs_config
             
-            timestamp = capture.depth_timestamp_usec / 1e6
-            
-            self.capture_history.append({
-                "color": color,
-                "depth": depth,
-                "timestamp": timestamp,
-                "step_idx": 0 
-            })
-            if len(self.capture_history) > self.max_history:
-                self.capture_history.pop(0)
-        
-        valid_k = min(k, len(self.capture_history))
-        if valid_k == 0: return {}
-        
-        recent_frames = self.capture_history[-valid_k:]
-        
-        return {
-            f"kinect_{self.device_index}": {
-                "color": np.stack([f["color"] for f in recent_frames]),
-                "depth": np.stack([f["depth"] for f in recent_frames]),
-                "timestamp": np.array([f["timestamp"] for f in recent_frames]),
-                "step_idx": np.array([0] * valid_k)
-            }
-        }
-    
-    def get_intrinsics(self):
-        """
-        Returns a list containing a tuple: (Camera Matrix, Distortion Coefficients).
-        """
-        try:
-            mat = self.k4a.calibration.get_camera_matrix(CalibrationType.COLOR)
-            dist = self.k4a.calibration.get_distortion_coefficients(CalibrationType.COLOR)
-            return [(mat, dist)] 
-        except Exception as e:
-            print(f"Error getting intrinsics for Kinect {self.device_index}: {e}")
-            return [(np.eye(3), np.zeros(8))] 
+            for serial in serials:
+                print(f"[System] Init Standard RealSense: {serial}")
+                cam = SingleRealsense(
+                    shm_manager=shm_manager,
+                    serial_number=serial,
+                    resolution=tuple(wh),
+                    capture_fps=fps,
+                    enable_color=True,
+                    enable_depth=True,
+                    process_depth=False,
+                    advanced_mode_config=advanced_mode_config,
+                    verbose=False
+                )
+                name = self.name_mapping.get(serial, serial)
+                self.cameras[name] = cam
+                self.devices_list.append(cam)
+                self.rs_names.append(name)
 
+        # 2. RealSense D405
+        if config_d405:
+            serials = config_d405.get("serials", [])
+            wh = config_d405.get("WH", (1280, 720))
+            fps = config_d405.get("fps", 30)
+            preset_id = config_d405.get("preset_id", 4)
+            disparity_transform = config_d405.get("disparity_transform", True)
+            history_fill = config_d405.get("history_fill", True)
+            history_decay = config_d405.get("history_decay", 30)
+            spatial_filter = config_d405.get("spatial_filter", {})
+            temporal_filter = config_d405.get("temporal_filter", {})
+            advanced_mode_config = config_d405.get("advanced_mode_config", None)
+            if advanced_mode_config is None and "parameters" in config_d405:
+                advanced_mode_config = config_d405
+            
+            for serial in serials:
+                print(f"[System] Init D405 (High Density): {serial}")
+                cam = SingleRealsense(
+                    shm_manager=shm_manager,
+                    serial_number=serial,
+                    resolution=tuple(wh),
+                    capture_fps=fps,
+                    enable_color=True,
+                    enable_depth=True,
+                    process_depth=True, # ACTIVATES D405 TUNER FILTERS
+                    preset_id=preset_id,
+                    disparity_transform=disparity_transform,
+                    history_fill=history_fill,
+                    history_decay=history_decay,
+                    spatial_filter=spatial_filter,
+                    temporal_filter=temporal_filter,
+                    advanced_mode_config=advanced_mode_config,
+                    verbose=False
+                )
+                name = self.name_mapping.get(serial, serial)
+                self.cameras[name] = cam
+                self.devices_list.append(cam)
+                self.d405_names.append(name)
+
+        # 3. Azure Kinect
+        if config_kinect:
+            indices = config_kinect.get("indices", [])
+            wh = config_kinect.get("WH", (1280, 720))
+            fps = config_kinect.get("fps", 30)
+            
+            # Map indices to serials for consistent keying
+            available_kinect_serials = SingleKinect.get_connected_devices_serial()
+            
+            for idx in indices:
+                if idx < len(available_kinect_serials):
+                    serial = available_kinect_serials[idx]
+                    print(f"[System] Init Azure Kinect: {serial} (Index {idx})")
+                    cam = SingleKinect(
+                        shm_manager=shm_manager,
+                        serial_number=serial,
+                        resolution=tuple(wh),
+                        capture_fps=fps,
+                        enable_color=True,
+                        enable_depth=True,
+                        verbose=False
+                    )
+                    # Use provided name, else fallback to kinect_X
+                    name = self.name_mapping.get(serial, f"kinect_{idx}")
+                    self.cameras[name] = cam
+                    self.kinect_names.append(name)
+                    
+                    # Store device index on object for the demo script's intrinsic lookup
+                    cam.device_index = idx 
+                    self.devices_list.append(cam)
+                else:
+                    print(f"[Error] Kinect Index {idx} out of range.")
+
+    def start(self):
+        for cam in self.cameras.values():
+            cam.start()
 
     def stop(self):
-        self.k4a.stop()
+        for cam in self.cameras.values():
+            cam.stop()
 
+    def is_ready(self):
+        return all(cam.is_ready for cam in self.cameras.values())
+
+    def get(self, k=None):
+        results = {}
+        for name, cam in self.cameras.items():
+            try:
+                data = cam.get(k)
+                if data is not None:
+                    results[name] = data
+            except:
+                continue
+        return results if results else None
+
+    def set_exposure(self, exposure=None, gain=None):
+        """
+        Set exposure and gain.
+        exposure/gain can be:
+        - a single value (applied to all)
+        - a dict {serial_or_name: value}
+        """
+        for name, cam in self.cameras.items():
+            if isinstance(cam, (SingleRealsense, SingleKinect)):
+                # Determine exposure for this specific camera
+                c_exp = exposure
+                if isinstance(exposure, dict):
+                    # Try name first, then serial
+                    c_exp = exposure.get(name, exposure.get(cam.serial_number))
+                
+                # Determine gain for this specific camera
+                c_gain = gain
+                if isinstance(gain, dict):
+                    c_gain = gain.get(name, gain.get(cam.serial_number))
+                
+                cam.set_exposure(c_exp, c_gain)
 
 class CameraSystem:
     def __init__(
         self, 
-        realsense_config={"WH": [848, 480], "fps": 30, "serials": []},
-        d405_config={"WH": [848, 480], "fps": 30, "serials": []},
-        kinect_config={"mode": "NFOV_UNBINNED", "fps": 30, "indices": []},
-        exposure=10000, 
-        gain=60, 
-        white_balance=3800
+        realsense_config=None,
+        config_d405=None,
+        config_kinect=None,
+        exposure=None, 
+        gain=None,
+        name_mapping=None
     ):
         self.shm_manager = SharedMemoryManager()
         self.shm_manager.start()
         
-        self.devices = []
-        self.cam_ids = [] 
+        # Initialize Backend
+        self.cameras = MultiCamera(
+            rs_config=realsense_config,
+            config_d405=config_d405,
+            config_kinect=config_kinect,
+            shm_manager=self.shm_manager,
+            name_mapping=name_mapping
+        )
 
-        # 1. Initialize Standard RealSense Group
-        if realsense_config.get("serials"):
-            print(f"Initializing Standard RealSense: {realsense_config['serials']}")
-            rs_group = MultiRealsense(
-                serial_numbers=realsense_config["serials"],
-                shm_manager=self.shm_manager,
-                resolution=tuple(realsense_config["WH"]),
-                capture_fps=realsense_config["fps"],
-                enable_color=True, enable_depth=True, process_depth=True, verbose=False,
-            )
-            try:
-                rs_group.set_exposure(exposure=exposure, gain=gain)
-                rs_group.set_white_balance(white_balance)
-            except Exception as e:
-                print(f"Warning setting RS options: {e}")
-                
-            rs_group.start()
-            self.devices.append(rs_group)
-            self.cam_ids.extend(range(len(realsense_config["serials"])))
+        # Store D405 names for rotation/intrinsic transformation
+        self.d405_names = self.cameras.d405_names
+        self.kinect_names = self.cameras.kinect_names
 
-        # 2. Initialize D405 RealSense Group
-        if d405_config.get("serials"):
-            print(f"Initializing D405: {d405_config['serials']}")
-            d405_group = MultiRealsense(
-                serial_numbers=d405_config["serials"],
-                shm_manager=self.shm_manager,
-                resolution=tuple(d405_config["WH"]),
-                capture_fps=d405_config["fps"],
-                enable_color=True, enable_depth=True, process_depth=True, verbose=False,
-            )
-            try:
-                d405_group.set_exposure(exposure=exposure, gain=gain)
-                d405_group.set_white_balance(white_balance)
-            except Exception as e:
-                print(f"Warning setting D405 options: {e}")
+        self.cameras.start()
 
-            d405_group.start()
-            self.devices.append(d405_group)
-
-        # 3. Initialize Azure Kinects
-        if kinect_config.get("indices"):
-            for idx in kinect_config["indices"]:
-                kinect = AzureKinectWrapper(
-                    device_index=idx, 
-                    mode_str=kinect_config.get("mode", "NFOV_UNBINNED"), 
-                    fps=kinect_config.get("fps", 30)
-                )
-                self.devices.append(kinect)
-                self.cam_ids.append(f"kinect_{idx}")
-
-        time.sleep(3)
+        # Apply settings after cameras are started
+        self.cameras.set_exposure(exposure=exposure, gain=gain)
+        
+        # Public property for external scripts to access device list
+        self.devices = self.cameras.devices_list
+        
         self.recording = False
         self.end = False
+        
+        # Optional: Internal keyboard listener (can be ignored if run_demo handles it)
         self.listener = keyboard.Listener(on_press=self.on_press)
         self.listener.start()
-        print("Camera system is ready.")
+
+    @property
+    def num_cam(self):
+        return len(self.cameras.cameras)
 
     def get_observation(self):
-        return self._get_sync_frame()
+        obs = self._get_sync_frame()
+        if obs is None:
+            return None
+        
+        # Transformation: Rotate D405 and Crop all to 720x720
+        transformed_obs = {}
+        for name, data in obs.items():
+            color = data['color']
+            depth = data['depth']
+            
+            # 1. Rotate D405 90deg Clockwise
+            if name in self.d405_names:
+                color = cv2.rotate(color, cv2.ROTATE_90_CLOCKWISE)
+                depth = cv2.rotate(depth, cv2.ROTATE_90_CLOCKWISE)
+            
+            # 2. Center Crop to 720x720
+            h, w = color.shape[:2]
+            target_h, target_w = 720, 720
+            
+            y_start = max(0, (h - target_h) // 2)
+            x_start = max(0, (w - target_w) // 2)
+            
+            # Crop if larger than target
+            if h > target_h or w > target_w:
+                color = color[y_start:y_start+target_h, x_start:x_start+target_w]
+                depth = depth[y_start:y_start+target_h, x_start:x_start+target_w]
+            
+            transformed_obs[name] = {
+                "color": color,
+                "depth": depth,
+                "timestamp": data['timestamp'],
+                "step_idx": data['step_idx'],
+                "camera_receive_timestamp": data.get("camera_receive_timestamp", 0)
+            }
+            
+        return transformed_obs
+
+    def get_intrinsics(self, name):
+        """
+        Returns the transformed intrinsic matrix considering the rotation and cropping.
+        """
+        cam = self.cameras.cameras.get(name)
+        if not cam:
+            return None
+            
+        K = cam.get_intrinsics().copy()
+        
+        # 1. Handle Rotation (D405)
+        if name in self.d405_names:
+            # Assuming D405 starts as 1280x720
+            W_orig = 1280 
+            fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
+            # After CW rotation: x'=y, y'=W-x
+            # K' = [fy 0 cy; 0 fx W-cx; 0 0 1]
+            K = np.array([
+                [fy, 0, cy],
+                [0, fx, W_orig - cx],
+                [0, 0, 1]
+            ], dtype=np.float64)
+            h_rot, w_rot = 1280, 720
+        else:
+            # No rotation, get current resolution
+            # Standard RS: 848x480, Kinect: 1280x720
+            if name in self.kinect_names:
+                h_rot, w_rot = 720, 1280
+            else:
+                # Fallback to whatever the camera reports if possible, 
+                # but we usually know the config
+                h_rot, w_rot = cam.resolution[1], cam.resolution[0]
+
+        # 2. Handle Cropping to 720x720
+        target_h, target_w = 720, 720
+        y_start = max(0, (h_rot - target_h) // 2)
+        x_start = max(0, (w_rot - target_w) // 2)
+        
+        K[0, 2] -= x_start
+        K[1, 2] -= y_start
+        
+        return K
+
+    def get_depth_scale(self, name):
+        cam = self.cameras.cameras.get(name)
+        if not cam:
+            return 0.001
+        if hasattr(cam, "get_depth_scale"):
+            return cam.get_depth_scale()
+        return 0.001
 
     def _get_sync_frame(self, k=4):
-        raw_collections = []
-        for dev in self.devices:
-            raw_collections.append(dev.get(k=k))
+        # Get data from all cameras
+        data_map = self.cameras.get(k=k)
+        if not data_map or len(data_map) < len(self.cameras.cameras): 
+            return None
 
-        combined_data = {}
-        rs_offset = 0
+        # Robust Synchronization Logic
+        # 1. Collect all latest timestamps
+        latest_timestamps = []
+        valid_keys = []
         
-        for collection in raw_collections:
-            for key, val in collection.items():
-                new_key = key
-                if isinstance(key, int):
-                    new_key = key + rs_offset
-                combined_data[new_key] = val
+        for key, val in data_map.items():
+            if val is not None and len(val['timestamp']) > 0:
+                latest_timestamps.append(val['timestamp'][-1])
+                valid_keys.append(key)
+        
+        if not latest_timestamps: return None
+
+        # 2. Determine anchor timestamp (median is robust against one laggy camera)
+        target_ts = np.median(latest_timestamps)
+
+        result = {}
+        for key in valid_keys:
+            val = data_map[key]
+            timestamps = val["timestamp"]
             
-            if any(isinstance(k, int) for k in collection.keys()):
-                rs_offset += len(collection)
-
-        timestamps = []
-        for cam_key in combined_data:
-            if len(combined_data[cam_key]["timestamp"]) > 0:
-                timestamps.append(combined_data[cam_key]["timestamp"][-1])
-        
-        if not timestamps: return None
-        
-        last_timestamp = np.min(timestamps)
-
-        data = {}
-        for cam_key, value in combined_data.items():
-            this_timestamps = value["timestamp"]
-            diffs = np.abs(this_timestamps - last_timestamp)
-            best_idx = np.argmin(diffs)
+            # Find index with minimum time distance to target
+            dists = np.abs(timestamps - target_ts)
+            best_idx = np.argmin(dists)
             
-            data[cam_key] = {}
-            data[cam_key]["color"] = value["color"][best_idx]
-            data[cam_key]["depth"] = value["depth"][best_idx]
-            data[cam_key]["timestamp"] = value["timestamp"][best_idx]
-            data[cam_key]["step_idx"] = value.get("step_idx", [0]*len(this_timestamps))[best_idx]
+            # Threshold check: if sync is off by > 50ms, warn or skip?
+            # For now, we take the best we have.
+            
+            result[key] = {
+                "color": val["color"][best_idx],
+                "depth": val["depth"][best_idx],
+                "timestamp": val["timestamp"][best_idx],
+                "step_idx": val["step_idx"][best_idx],
+                # Pass through receive timestamp for analysis
+                "camera_receive_timestamp": val.get("camera_receive_timestamp", 0) 
+            }
 
-        return data
+        return result
 
     def on_press(self, key):
         try:
             if key == keyboard.Key.space:
-                if not self.recording:
-                    self.recording = True
-                    print("Space pressed (Action Triggered)")
-                else:
-                    self.recording = False
-                    self.end = True
+                self.recording = not self.recording
+                print(f"Recording: {self.recording}")
+            elif key == keyboard.Key.esc:
+                self.end = True
         except AttributeError:
             pass
 
-    def record(self, output_path):
-        exist_dir(output_path)
-        exist_dir(f"{output_path}/color")
-        exist_dir(f"{output_path}/depth")
-
-        first_obs = self.get_observation()
-        if not first_obs:
-            print("No data received.")
-            return
-
-        self.cam_keys_cache = list(first_obs.keys())
-        for key in self.cam_keys_cache:
-            exist_dir(f"{output_path}/color/{key}")
-            exist_dir(f"{output_path}/depth/{key}")
-
-        metadata = {}
-        metadata["recording"] = {str(k): {} for k in self.cam_keys_cache}
-        
-        all_intrinsics = []
-        for dev in self.devices:
-            try:
-                ints = dev.get_intrinsics()
-                processed_ints = []
-                for x in ints:
-                    if isinstance(x, tuple):
-                        processed_ints.append(x[0]) 
-                    else:
-                        processed_ints.append(x)
-                all_intrinsics.extend(processed_ints)
-            except: pass
-            
-        metadata["intrinsics"] = [x.tolist() if hasattr(x, "tolist") else x for x in all_intrinsics]
-        
-        print(f"Recording cameras: {self.cam_keys_cache}")
-        last_timestamps = {k: -1 for k in self.cam_keys_cache}
-        
-        while not self.end:
-            if self.recording:
-                obs = self.get_observation()
-                if obs is None: continue
-
-                for key in self.cam_keys_cache:
-                    ts = obs[key]["timestamp"]
-                    if ts != last_timestamps[key]:
-                        last_timestamps[key] = ts
-                        step_idx = obs[key]["step_idx"]
-                        if step_idx == 0 or step_idx == -1:
-                            step_idx = int(ts * 1000)
-
-                        cv2.imwrite(f"{output_path}/color/{key}/{step_idx}.png", obs[key]["color"])
-                        np.save(f"{output_path}/depth/{key}/{step_idx}.npy", obs[key]["depth"])
-                        metadata["recording"][str(key)][step_idx] = ts
-
-        print("End recording")
+    def stop(self):
+        self.cameras.stop()
         self.listener.stop()
-        with open(f"{output_path}/metadata.json", "w") as f:
-            json.dump(metadata, f)
-        
-        for dev in self.devices:
-            dev.stop()
+        self.shm_manager.shutdown()
 
     def calibrate(self, visualize=True):
-        print("Initializing calibration board...")
+        import pickle
+        # ChArUco setup based on generate_charuco.py parameters
+        squares_x = 4
+        squares_y = 5
+        square_length = 0.05
+        marker_length = 0.037
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        
-        board = cv2.aruco.CharucoBoard(
-            (4, 5),
-            squareLength=0.05,
-            markerLength=0.037,
-            dictionary=dictionary,
-        )
+        board = cv2.aruco.CharucoBoard((squares_x, squares_y), square_length, marker_length, dictionary)
+        detector = cv2.aruco.CharucoDetector(board)
 
-        intrinsics_map = {}
-        rs_offset = 0
+        print("\n--- Calibration Started ---")
+        print("Waiting for valid ChArUco detection in all cameras...")
+        print("CONTROL: [SPACE] Save Calibration, [ESC] Cancel/Exit")
         
-        # Populate intrinsics map with (matrix, distortion) tuples
-        for dev in self.devices:
-            dev_intrinsics = dev.get_intrinsics() 
-            
-            if isinstance(dev, AzureKinectWrapper):
-                key = f"kinect_{dev.device_index}"
-                if len(dev_intrinsics) > 0:
-                    intrinsics_map[key] = dev_intrinsics[0]
-            else:
-                for i, mat in enumerate(dev_intrinsics):
-                    # Assume Realsense is rectified or low distortion (pass None)
-                    intrinsics_map[rs_offset + i] = (mat, None)
-                rs_offset += len(dev_intrinsics)
-        
-        print(f"Calibration Targets: {list(intrinsics_map.keys())}")
-        print("Please hold the board visible to ALL cameras.")
-        print("When 'READY: SPACE TO SAVE' appears, press SPACE to finish.")
+        self.recording = False # Reset recording flag to use as Save trigger
 
-        # Ensure recording flag is False to start
-        self.recording = False
-
-        while True:
+        while not self.end:
             obs = self.get_observation()
-            if not obs: continue
+            if obs is None: continue
             
-            missing_cams = [k for k in intrinsics_map.keys() if k not in obs]
-            if missing_cams: continue
+            display_imgs = []
+            camera_keys = sorted(obs.keys())
             
-            c2ws = {} 
-            fail_flag = False
-            vis_images = {} # Accumulate images to show later
+            poses = {} # key -> T_cam_board
+            detections_complete = True
             
-            # --- 1. Processing Loop ---
-            for key in intrinsics_map.keys():
-                image = obs[key]["color"]
-                intrinsic, dist_coeffs = intrinsics_map[key]
-                vis_img = image.copy()
-
-                corners, ids, _ = cv2.aruco.detectMarkers(image, dictionary)
-                if ids is None or len(ids) == 0:
-                    if visualize:
-                        cv2.putText(vis_img, "NO MARKERS", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-                    fail_flag = True
-                    vis_images[key] = vis_img
-                    continue 
+            for serial in camera_keys:
+                data = obs[serial]
+                img = data['color'].copy()
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                charuco_corners, charuco_ids, marker_corners, marker_ids = detector.detectBoard(gray)
                 
-                retval, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
-                    corners, ids, image, board, 
-                    cameraMatrix=intrinsic,
-                    distCoeffs=dist_coeffs
-                )
+                K = self.get_intrinsics(serial)
                 
-                if charuco_corners is None or len(charuco_corners) < 11:
-                    if visualize:
-                        cv2.putText(vis_img, "FEW CORNERS", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-                        if charuco_corners is not None:
-                             cv2.aruco.drawDetectedCornersCharuco(vis_img, charuco_corners, charuco_ids)
-                    fail_flag = True
-                    vis_images[key] = vis_img
-                    continue
-
-                if visualize:
-                    cv2.aruco.drawDetectedCornersCharuco(vis_img, charuco_corners, charuco_ids)
-
-                retval, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(
-                    charuco_corners, 
-                    charuco_ids, 
-                    board, 
-                    intrinsic, 
-                    dist_coeffs, 
-                    None, None 
-                )
-                
-                if not retval:
-                    fail_flag = True
-                    vis_images[key] = vis_img
-                    continue
-                
-                reprojected_points, _ = cv2.projectPoints(
-                    board.getChessboardCorners()[charuco_ids, :],
-                    rvec, tvec, intrinsic, dist_coeffs
-                )
-                error = np.sqrt(np.sum((reprojected_points.reshape(-1, 2) - charuco_corners.reshape(-1, 2)) ** 2, axis=1)).mean()
-                
-                if error > 1: 
-                    if visualize:
-                        cv2.putText(vis_img, f"HIGH ERROR: {error:.2f}", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-                    fail_flag = True
-                    vis_images[key] = vis_img
-                    continue
-                
-                if visualize:
-                    cv2.putText(vis_img, f"OK ({error:.2f})", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
-                    cv2.drawFrameAxes(vis_img, intrinsic, dist_coeffs, rvec, tvec, 0.1)
-
-                R, _ = cv2.Rodrigues(rvec)
-                w2c = np.eye(4)
-                w2c[:3, :3] = R
-                w2c[:3, 3] = tvec[:, 0]
-                c2ws[key] = np.linalg.inv(w2c)
-                vis_images[key] = vis_img
-
-            # --- 2. Global Check & User Input ---
-            all_cameras_good = (not fail_flag) and (len(c2ws) == len(intrinsics_map))
-
-            # If user pressed space (self.recording=True) AND all cameras are good -> SAVE
-            if all_cameras_good and self.recording:
-                print("\nSUCCESS! Calibration complete for all cameras.")
-                with open("calibrate.pkl", "wb") as f:
-                    pickle.dump(c2ws, f)
-                break
-            
-            # --- 3. Visualization Loop ---
-            if visualize:
-                for key in vis_images:
-                    img = vis_images[key]
-                    if all_cameras_good:
-                        # Show prompt to save
-                        cv2.putText(img, "READY: SPACE TO SAVE", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                    elif self.recording:
-                        # User pressed space but not ready
-                        cv2.putText(img, "CANNOT SAVE YET", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                if charuco_corners is not None and len(charuco_corners) >= 6:
+                    obj_pts, img_pts = board.matchImagePoints(charuco_corners, charuco_ids)
+                    success, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, None)
                     
-                    cv2.imshow(f"Calib {key}", img)
-                    cv2.waitKey(1)
+                    if success:
+                        # Calculate Reprojection Error
+                        proj_pts, _ = cv2.projectPoints(obj_pts, rvec, tvec, K, None)
+                        err = np.linalg.norm(img_pts - proj_pts.reshape(-1, 2), axis=1).mean()
+                        
+                        R, _ = cv2.Rodrigues(rvec)
+                        T_cam_board = np.eye(4)
+                        T_cam_board[:3, :3] = R
+                        T_cam_board[:3, 3] = tvec.flatten()
+                        poses[serial] = T_cam_board
+                        
+                        if visualize:
+                            cv2.aruco.drawDetectedCornersCharuco(img, charuco_corners, charuco_ids)
+                            cv2.drawFrameAxes(img, K, None, rvec, tvec, 0.1)
+                            cv2.putText(img, f"RMS Error: {err:.3f} px", (30, 50), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    else:
+                        detections_complete = False
+                        if visualize:
+                            cv2.putText(img, "PnP Failed", (30, 50), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                else:
+                    detections_complete = False
+                    if visualize:
+                        cv2.putText(img, "No Board Detected", (30, 50), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                
+                if visualize:
+                    display_imgs.append(img)
+            
+            if visualize:
+                # Resize and combine for preview
+                scaled_imgs = [cv2.resize(im, (640, 640)) for im in display_imgs]
+                combined = np.hstack(scaled_imgs)
+                
+                status_text = "READY TO SAVE (Press SPACE)" if (detections_complete and len(poses) == self.num_cam) else "WAITING FOR ALL CAMERAS..."
+                status_color = (0, 255, 0) if (detections_complete and len(poses) == self.num_cam) else (0, 0, 255)
+                cv2.putText(combined, status_text, (50, combined.shape[0]-50), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, status_color, 3)
+                
+                cv2.imshow("Calibration Preview", combined)
+                # We check waitKey for space too in case listener is slow
+                key = cv2.waitKey(1)
+                if key == 27: self.end = True
+                if key == 32: self.recording = True
+
+            # If space was pressed and we have a valid set of poses
+            if self.recording and len(poses) == self.num_cam:
+                print("\nSaving Calibration...")
+                # Anchor at first camera
+                anchor_key = camera_keys[0]
+                anchor_T_board = poses[anchor_key]
+                final_c2ws = []
+                c2ws_by_id = {}
+                
+                for serial in camera_keys:
+                    # T_anchor_cam = T_anchor_board * T_board_cam
+                    T_cam_board = poses[serial]
+                    T_anchor_cam = anchor_T_board @ np.linalg.inv(T_cam_board)
+                    final_c2ws.append(T_anchor_cam)
+                    c2ws_by_id[serial] = T_anchor_cam
+                
+                # Save just the list of matrices to match existing pipeline
+                with open("calibrate.pkl", "wb") as f:
+                    pickle.dump(final_c2ws, f)
+                    
+                print(f"Success! Calibration saved to calibrate.pkl (Anchor: {anchor_key})")
+                cv2.destroyAllWindows()
+                return True
+            
+            # Reset recording flag if we failed to save (e.g. board lost right as space was pressed)
+            if self.recording and len(poses) != self.num_cam:
+                self.recording = False
         
         cv2.destroyAllWindows()
-        self.listener.stop()
-        for dev in self.devices:
-            dev.stop()
+        return False

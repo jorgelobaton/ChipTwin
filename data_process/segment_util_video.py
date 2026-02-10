@@ -22,18 +22,26 @@ parser = ArgumentParser()
 parser.add_argument("--base_path", type=str, default="/home/hanxiao/Desktop/Research/proj-qqtt/proj-QQTT/data/real_collect")
 parser.add_argument("--case_name", type=str)
 parser.add_argument("--TEXT_PROMPT", type=str)
-parser.add_argument("--camera_idx", type=int)
+parser.add_argument("--camera_id", type=str)
 parser.add_argument("--output_path", type=str, default="NONE")
 args = parser.parse_args()
 
 base_path = args.base_path
 case_name = args.case_name
 TEXT_PROMPT = args.TEXT_PROMPT
-camera_idx = args.camera_idx
+camera_id = args.camera_id
 if args.output_path == "NONE":
     output_path = f"{base_path}/{case_name}"
 else:
     output_path = args.output_path
+
+# Get frame_num from metadata if available
+frame_num = -1
+metadata_path = f"{base_path}/{case_name}/metadata.json"
+if os.path.exists(metadata_path):
+    with open(metadata_path, "r") as f:
+        meta = json.load(f)
+        frame_num = meta.get("frame_num", -1)
 
 def existDir(dir_path):
     if not os.path.exists(dir_path):
@@ -47,12 +55,12 @@ TEXT_THRESHOLD = 0.25
 PROMPT_TYPE_FOR_VIDEO = "box"  # choose from ["point", "box", "mask"]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-VIDEO_PATH = f"{base_path}/{case_name}/color/{camera_idx}.mp4"
+VIDEO_PATH = f"{base_path}/{case_name}/color/{camera_id}.mp4"
 existDir(f"{base_path}/{case_name}/tmp_data")
 existDir(f"{base_path}/{case_name}/tmp_data/{case_name}")
-existDir(f"{base_path}/{case_name}/tmp_data/{case_name}/{camera_idx}")
+existDir(f"{base_path}/{case_name}/tmp_data/{case_name}/{camera_id}")
 
-SOURCE_VIDEO_FRAME_DIR = f"{base_path}/{case_name}/tmp_data/{case_name}/{camera_idx}"
+SOURCE_VIDEO_FRAME_DIR = f"{base_path}/{case_name}/tmp_data/{case_name}/{camera_id}"
 
 """
 Step 1: Environment settings and model initialization for Grounding DINO and SAM 2
@@ -85,7 +93,9 @@ source_frames.mkdir(parents=True, exist_ok=True)
 with sv.ImageSink(
     target_dir_path=source_frames, overwrite=True, image_name_pattern="{:05d}.jpg"
 ) as sink:
-    for frame in tqdm(frame_generator, desc="Saving Video Frames"):
+    for i, frame in enumerate(tqdm(frame_generator, desc="Saving Video Frames")):
+        if frame_num > 0 and i >= frame_num:
+            break
         sink.save_image(frame)
 
 # scan all the JPEG frame names in this directory
@@ -194,18 +204,18 @@ Step 5: Visualize the segment results across the video and save them
 """
 
 existDir(f"{output_path}/mask/")
-existDir(f"{output_path}/mask/{camera_idx}")
+existDir(f"{output_path}/mask/{camera_id}")
 
 ID_TO_OBJECTS = {i: obj for i, obj in enumerate(OBJECTS)}
 
 # Save the id_to_objects into json
-with open(f"{output_path}/mask/mask_info_{camera_idx}.json", "w") as f:
+with open(f"{output_path}/mask/mask_info_{camera_id}.json", "w") as f:
     json.dump(ID_TO_OBJECTS, f)
 
 for frame_idx, masks in video_segments.items():
     for obj_id, mask in masks.items():
-        existDir(f"{output_path}/mask/{camera_idx}/{obj_id}")
+        existDir(f"{output_path}/mask/{camera_id}/{obj_id}")
         # mask is 1 * H * W
         Image.fromarray((mask[0] * 255).astype(np.uint8)).save(
-            f"{output_path}/mask/{camera_idx}/{obj_id}/{frame_idx}.png"
+            f"{output_path}/mask/{camera_id}/{obj_id}/{frame_idx}.png"
         )

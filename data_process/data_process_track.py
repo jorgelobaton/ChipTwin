@@ -35,7 +35,7 @@ def getSphereMesh(center, radius=0.1, color=[0, 0, 0]):
 
 
 # Based on the valid mask, filter out the bad tracking data
-def filter_track(track_path, pcd_path, mask_path, frame_num, num_cam):
+def filter_track(track_path, pcd_path, mask_path, frame_num, camera_ids):
     with open(f"{mask_path}/processed_masks.pkl", "rb") as f:
         processed_masks = pickle.load(f)
 
@@ -46,8 +46,8 @@ def filter_track(track_path, pcd_path, mask_path, frame_num, num_cam):
     controller_points = []
     controller_colors = []
     controller_visibilities = []
-    for i in range(num_cam):
-        current_track_data = np.load(f"{track_path}/{i}.npz")
+    for i, cam_id in enumerate(camera_ids):
+        current_track_data = np.load(f"{track_path}/{cam_id}.npz")
         # Filter out the track data
         tracks = current_track_data["tracks"]
         tracks = np.round(tracks).astype(int)
@@ -57,6 +57,10 @@ def filter_track(track_path, pcd_path, mask_path, frame_num, num_cam):
 
         # Locate the track points in the object mask of the first frame
         object_mask = processed_masks[0][i]["object"]
+        H, W = object_mask.shape
+        tracks[:, :, 0] = np.clip(tracks[:, :, 0], 0, H - 1)
+        tracks[:, :, 1] = np.clip(tracks[:, :, 1], 0, W - 1)
+
         track_object_idx = np.zeros((num_points), dtype=int)
         for j in range(num_points):
             if visibility[0, j] == 1:
@@ -440,11 +444,15 @@ if __name__ == "__main__":
     mask_path = f"{base_path}/{case_name}/mask"
     track_path = f"{base_path}/{case_name}/cotracker"
 
-    num_cam = len(glob.glob(f"{mask_path}/mask_info_*.json"))
+    # Get camera IDs from the mask info files
+    mask_info_files = glob.glob(f"{mask_path}/mask_info_*.json")
+    camera_ids = sorted([f.split("mask_info_")[-1].replace(".json", "") for f in mask_info_files])
+    
     frame_num = len(glob.glob(f"{pcd_path}/*.npz"))
 
     # Filter the track data using the semantic mask of object and controller
-    track_data = filter_track(track_path, pcd_path, mask_path, frame_num, num_cam)
+    # We pass camera_ids instead of num_cam
+    track_data = filter_track(track_path, pcd_path, mask_path, frame_num, camera_ids)
     # Filter motion
     track_data = filter_motion(track_data)
     # # Save the filtered track data

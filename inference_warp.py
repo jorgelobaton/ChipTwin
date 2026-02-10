@@ -63,6 +63,8 @@ if __name__ == "__main__":
     cfg.intrinsics = np.array(data["intrinsics"])
     cfg.WH = data["WH"]
     cfg.overlay_path = f"{base_path}/{case_name}/color"
+    if "camera_ids" in data:
+        cfg.camera_ids = data["camera_ids"]
 
     logger.set_log_file(path=base_dir, name="inference_log")
     trainer = InvPhyTrainerWarp(

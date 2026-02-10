@@ -607,7 +607,13 @@ def readQQTTSceneInfo(
     num_cam = len(intrinsics)
     assert num_cam == len(c2ws), "Number of cameras and camera poses mismatched"
 
-    H, W = 480, 848  # fixed resolution
+    # Infer H, W from the first available image instead of hardcoding
+    _sample_img_path = os.path.join(path, "0.png")
+    if os.path.exists(_sample_img_path):
+        _sample_img = Image.open(_sample_img_path)
+        W, H = _sample_img.size  # PIL gives (width, height)
+    else:
+        H, W = 480, 848  # fallback for legacy data
 
     if use_high_res:
         upsample = 4

@@ -190,7 +190,8 @@ class SharedMemoryRingBuffer:
             out = self._allocate_empty(k)
         start_time = time.monotonic()
         count = self.counter.load()
-        assert k <= count
+        if k > count:
+            return None
         curr_idx = (count - 1) % self.buffer_size
         for key, value in self.shared_arrays.items():
             arr = value.get()

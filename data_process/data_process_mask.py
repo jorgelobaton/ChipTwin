@@ -39,7 +39,7 @@ def read_mask(mask_path):
     return mask
 
 
-def process_pcd_mask(frame_idx, pcd_path, mask_path, mask_info, num_cam):
+def process_pcd_mask(frame_idx, pcd_path, mask_path, mask_info, camera_ids):
     global processed_masks
     processed_masks[frame_idx] = {}
 
@@ -52,10 +52,10 @@ def process_pcd_mask(frame_idx, pcd_path, mask_path, mask_info, num_cam):
     object_pcd = o3d.geometry.PointCloud()
     controller_pcd = o3d.geometry.PointCloud()
 
-    for i in range(num_cam):
+    for i, cam_id in enumerate(camera_ids):
         # Load the object mask
-        object_idx = mask_info[i]["object"]
-        mask = read_mask(f"{mask_path}/{i}/{object_idx}/{frame_idx}.png")
+        object_idx = mask_info[cam_id]["object"]
+        mask = read_mask(f"{mask_path}/{cam_id}/{object_idx}/{frame_idx}.png")
         object_mask = np.logical_and(masks[i], mask)
         object_points = points[i][object_mask]
         object_colors = colors[i][object_mask]
@@ -66,8 +66,8 @@ def process_pcd_mask(frame_idx, pcd_path, mask_path, mask_info, num_cam):
 
         # Load the controller mask
         controller_mask = np.zeros_like(masks[i])
-        for controller_idx in mask_info[i]["controller"]:
-            mask = read_mask(f"{mask_path}/{i}/{controller_idx}/{frame_idx}.png")
+        for controller_idx in mask_info[cam_id]["controller"]:
+            mask = read_mask(f"{mask_path}/{cam_id}/{controller_idx}/{frame_idx}.png")
             controller_mask = np.logical_or(controller_mask, mask)
         controller_mask = np.logical_and(masks[i], controller_mask)
         controller_points = points[i][controller_mask]
@@ -91,15 +91,14 @@ def process_pcd_mask(frame_idx, pcd_path, mask_path, mask_info, num_cam):
     )
     controller_pcd = controller_pcd.select_by_index(ind)
 
-    # controller_pcd.paint_uniform_color([1, 0, 0])
-    # o3d.visualization.draw_geometries([object_pcd, controller_pcd])
     object_pcd = o3d.geometry.PointCloud()
     controller_pcd = o3d.geometry.PointCloud()
-    for i in range(num_cam):
+
+    for i, cam_id in enumerate(camera_ids):
         processed_masks[frame_idx][i] = {}
         # Load the object mask
-        object_idx = mask_info[i]["object"]
-        mask = read_mask(f"{mask_path}/{i}/{object_idx}/{frame_idx}.png")
+        object_idx = mask_info[cam_id]["object"]
+        mask = read_mask(f"{mask_path}/{cam_id}/{object_idx}/{frame_idx}.png")
         object_mask = np.logical_and(masks[i], mask)
         object_points = points[i][object_mask]
         indices = np.nonzero(object_mask)
@@ -117,8 +116,8 @@ def process_pcd_mask(frame_idx, pcd_path, mask_path, mask_info, num_cam):
 
         # Load the controller mask
         controller_mask = np.zeros_like(masks[i])
-        for controller_idx in mask_info[i]["controller"]:
-            mask = read_mask(f"{mask_path}/{i}/{controller_idx}/{frame_idx}.png")
+        for controller_idx in mask_info[cam_id]["controller"]:
+            mask = read_mask(f"{mask_path}/{cam_id}/{controller_idx}/{frame_idx}.png")
             controller_mask = np.logical_or(controller_mask, mask)
         controller_mask = np.logical_and(masks[i], controller_mask)
         controller_points = points[i][controller_mask]
@@ -156,27 +155,30 @@ if __name__ == "__main__":
     pcd_path = f"{base_path}/{case_name}/pcd"
     mask_path = f"{base_path}/{case_name}/mask"
 
-    num_cam = len(glob.glob(f"{mask_path}/mask_info_*.json"))
+    # Get camera IDs from the mask info files
+    mask_info_files = glob.glob(f"{mask_path}/mask_info_*.json")
+    camera_ids = sorted([f.split("mask_info_")[-1].replace(".json", "") for f in mask_info_files])
+    num_cam = len(camera_ids)
+    
     frame_num = len(glob.glob(f"{pcd_path}/*.npz"))
+    
     # Load the mask metadata
     mask_info = {}
-    for i in range(num_cam):
-        with open(f"{base_path}/{case_name}/mask/mask_info_{i}.json", "r") as f:
+    for cam_id in camera_ids:
+        with open(f"{base_path}/{case_name}/mask/mask_info_{cam_id}.json", "r") as f:
             data = json.load(f)
-        mask_info[i] = {}
+        mask_info[cam_id] = {}
         for key, value in data.items():
             if value != CONTROLLER_NAME:
-                if "object" in mask_info[i]:
+                if "object" in mask_info[cam_id]:
                     # TODO: Handle the case when there are multiple objects
-                    print(f"Warning: Multiple objects detected in camera {i}. Overwriting.")
-                    # import pdb
-                    # pdb.set_trace()
-                mask_info[i]["object"] = int(key)
+                    print(f"Warning: Multiple objects detected in camera {cam_id}. Overwriting.")
+                mask_info[cam_id]["object"] = int(key)
             if value == CONTROLLER_NAME:
-                if "controller" in mask_info[i]:
-                    mask_info[i]["controller"].append(int(key))
+                if "controller" in mask_info[cam_id]:
+                    mask_info[cam_id]["controller"].append(int(key))
                 else:
-                    mask_info[i]["controller"] = [int(key)]
+                    mask_info[cam_id]["controller"] = [int(key)]
 
     vis = o3d.visualization.Visualizer()
     vis.create_window()
@@ -185,7 +187,7 @@ if __name__ == "__main__":
     controller_pcd = None
     for i in tqdm(range(frame_num)):
         temp_object_pcd, temp_controller_pcd = process_pcd_mask(
-            i, pcd_path, mask_path, mask_info, num_cam
+            i, pcd_path, mask_path, mask_info, camera_ids
         )
         if i == 0:
             object_pcd = temp_object_pcd

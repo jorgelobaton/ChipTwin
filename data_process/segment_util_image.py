@@ -42,12 +42,20 @@ model_cfg = SAM2_MODEL_CONFIG
 sam2_model = build_sam2(model_cfg, sam2_checkpoint, device=DEVICE)
 sam2_predictor = SAM2ImagePredictor(sam2_model)
 
+# Clear cache after loading SAM2
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
 # build grounding dino model
 grounding_model = load_model(
     model_config_path=GROUNDING_DINO_CONFIG,
     model_checkpoint_path=GROUNDING_DINO_CHECKPOINT,
     device=DEVICE,
 )
+
+# Clear cache after loading GroundingDINO
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
 
 
 # setup the input image and text prompt for SAM 2 and Grounding DINO

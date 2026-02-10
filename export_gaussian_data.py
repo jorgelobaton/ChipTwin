@@ -29,16 +29,30 @@ with open("data_config.csv", newline="", encoding="utf-8") as csvfile:
 
         print(f"Processing {case_name}!!!!!!!!!!!!!!!")
 
+        # Load Metadata first to get Camera IDs
+        with open(f"{base_path}/{case_name}/metadata.json", "r") as f:
+            meta = json.load(f)
+            intrinsics = meta["intrinsics"]
+            # Fallback to range(3) if camera_ids not present (legacy support)
+            camera_ids = meta.get("camera_ids", [str(k) for k in range(3)])
+
         # Create the directory for the case
         existDir(f"{output_path}/{case_name}")
-        for i in range(3):
+        
+        for i, cam_id in enumerate(camera_ids):
             # Copy the original RGB image
+            # Source uses cam_id (e.g. D405_...), Dest uses index (0.png) for GS
             os.system(
-                f"cp {base_path}/{case_name}/color/{i}/0.png {output_path}/{case_name}/{i}.png"
+                f"cp {base_path}/{case_name}/color/{cam_id}/0.png {output_path}/{case_name}/{i}.png"
             )
             # Copy the original mask image
             # Get the mask path for the image
-            with open(f"{base_path}/{case_name}/mask/mask_info_{i}.json", "r") as f:
+            mask_info_path = f"{base_path}/{case_name}/mask/mask_info_{cam_id}.json"
+            if not os.path.exists(mask_info_path):
+                # Try integer fallback if file not found
+                mask_info_path = f"{base_path}/{case_name}/mask/mask_info_{i}.json"
+
+            with open(mask_info_path, "r") as f:
                 data = json.load(f)
             obj_idx = None
             for key, value in data.items():
@@ -46,20 +60,31 @@ with open("data_config.csv", newline="", encoding="utf-8") as csvfile:
                     if obj_idx is not None:
                         raise ValueError("More than one object detected.")
                     obj_idx = int(key)
-            mask_path = f"{base_path}/{case_name}/mask/{i}/{obj_idx}/0.png"
+            
+            mask_path = f"{base_path}/{case_name}/mask/{cam_id}/{obj_idx}/0.png"
+            if not os.path.exists(mask_path):
+                 mask_path = f"{base_path}/{case_name}/mask/{i}/{obj_idx}/0.png"
+
             os.system(f"cp {mask_path} {output_path}/{case_name}/mask_{i}.png")
             # Prepare the high-resolution image
-            os.system(
-                f"python ./data_process/image_upscale.py --img_path {base_path}/{case_name}/color/{i}/0.png --output_path {output_path}/{case_name}/{i}_high.png --category {category}"
+            ret = os.system(
+                f'python ./data_process/image_upscale.py --img_path {base_path}/{case_name}/color/{cam_id}/0.png --output_path {output_path}/{case_name}/{i}_high.png --category "{category}"'
             )
+            if ret != 0:
+                print(f"Error upscaling image {i}. Exiting.")
+                exit(1)
+                
             # Prepare the segmentation mask of the high-resolution image
-            os.system(
-                f"python ./data_process/segment_util_image.py --img_path {output_path}/{case_name}/{i}_high.png --TEXT_PROMPT {category} --output_path {output_path}/{case_name}/mask_{i}_high.png"
+            ret = os.system(
+                f'python ./data_process/segment_util_image.py --img_path {output_path}/{case_name}/{i}_high.png --TEXT_PROMPT "{category}" --output_path {output_path}/{case_name}/mask_{i}_high.png'
             )
+            if ret != 0:
+                print(f"Error segmenting high-res image {i}. Exiting.")
+                exit(1)
 
             # Copy the original depth image
             os.system(
-                f"cp {base_path}/{case_name}/depth/{i}/0.npy {output_path}/{case_name}/{i}_depth.npy"
+                f"cp {base_path}/{case_name}/depth/{cam_id}/0.npy {output_path}/{case_name}/{i}_depth.npy"
             )
 
             # Prepare the human mask for the low-resolution image and high-resolution image
@@ -73,8 +98,7 @@ with open("data_config.csv", newline="", encoding="utf-8") as csvfile:
         # Prepare the intrinsic and extrinsic parameters
         with open(f"{base_path}/{case_name}/calibrate.pkl", "rb") as f:
             c2ws = pickle.load(f)
-        with open(f"{base_path}/{case_name}/metadata.json", "r") as f:
-            intrinsics = json.load(f)["intrinsics"]
+        
         data = {}
         data["c2ws"] = c2ws
         data["intrinsics"] = intrinsics
@@ -95,7 +119,7 @@ with open("data_config.csv", newline="", encoding="utf-8") as csvfile:
         data = np.load(pcd_path)
         with open(processed_mask_path, "rb") as f:
             processed_masks = pickle.load(f)
-        for i in range(3):
+        for i in range(len(camera_ids)):
             points = data["points"][i]
             colors = data["colors"][i]
             mask = processed_masks[0][i]["object"]

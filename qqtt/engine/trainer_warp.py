@@ -2,6 +2,7 @@ from qqtt.data import RealData, SimpleData
 from qqtt.utils import logger, visualize_pc, cfg
 from qqtt.model.diff_simulator import (
     SpringMassSystemWarp,
+    XPBDSimulatorWarp,
 )
 import open3d as o3d
 import numpy as np
@@ -120,7 +121,12 @@ class InvPhyTrainerWarp:
             mask=self.init_masks,
         )
 
-        self.simulator = SpringMassSystemWarp(
+        if cfg.sim_method == "xpbd":
+            SimulatorClass = XPBDSimulatorWarp
+        else:
+            SimulatorClass = SpringMassSystemWarp
+
+        self.simulator = SimulatorClass(
             self.init_vertices,
             self.init_springs,
             self.init_rest_lengths,
@@ -148,16 +154,27 @@ class InvPhyTrainerWarp:
             gt_object_visibilities=self.object_visibilities,
             gt_object_motions_valid=self.object_motions_valid,
             self_collision=cfg.self_collision,
+            yield_strain=cfg.yield_strain,
+            hardening_factor=cfg.hardening_factor,
+            enable_plasticity=cfg.enable_plasticity,
+            break_strain=cfg.break_strain,
+            enable_breakage=cfg.enable_breakage,
         )
 
         if not pure_inference_mode:
             self.optimizer = torch.optim.Adam(
                 [
-                    wp.to_torch(self.simulator.wp_spring_Y),
-                    wp.to_torch(self.simulator.wp_collide_elas),
-                    wp.to_torch(self.simulator.wp_collide_fric),
-                    wp.to_torch(self.simulator.wp_collide_object_elas),
-                    wp.to_torch(self.simulator.wp_collide_object_fric),
+                    {"params": [
+                        wp.to_torch(self.simulator.wp_spring_Y),
+                        wp.to_torch(self.simulator.wp_collide_elas),
+                        wp.to_torch(self.simulator.wp_collide_fric),
+                        wp.to_torch(self.simulator.wp_collide_object_elas),
+                        wp.to_torch(self.simulator.wp_collide_object_fric),
+                    ]},
+                    {"params": [
+                        wp.to_torch(self.simulator.wp_yield_strain),
+                        wp.to_torch(self.simulator.wp_hardening_factor),
+                    ], "lr": cfg.base_lr * 0.1},
                 ],
                 lr=cfg.base_lr,
                 betas=(0.9, 0.99),
@@ -318,6 +335,9 @@ class InvPhyTrainerWarp:
             self.simulator.set_init_state(
                 self.simulator.wp_init_vertices, self.simulator.wp_init_velocities
             )
+            # Reset rest_lengths to undo accumulated plasticity from previous epoch
+            if self.simulator.enable_plasticity or self.simulator.enable_breakage:
+                self.simulator.reset_rest_lengths()
             with wp.ScopedTimer("backward"):
                 for j in tqdm(range(1, cfg.train_frame)):
                     self.simulator.set_controller_target(j)
@@ -329,16 +349,25 @@ class InvPhyTrainerWarp:
                     else:
                         if cfg.data_type == "real":
                             with self.simulator.tape:
-                                self.simulator.step()
+                                self.simulator._step_plasticity()
+                                self.simulator._step_core()
                                 self.simulator.calculate_loss()
                             self.simulator.tape.backward(self.simulator.loss)
                         else:
                             with self.simulator.tape:
-                                self.simulator.step()
+                                self.simulator._step_plasticity()
+                                self.simulator._step_core()
                                 self.simulator.calculate_simple_loss()
                             self.simulator.tape.backward(self.simulator.loss)
 
                     self.optimizer.step()
+
+                    # Clamp plasticity parameters to valid ranges to prevent instability/NaNs
+                    with torch.no_grad():
+                        # yield_strain > 0 (e.g. 0.001 to 1.0)
+                        wp.to_torch(self.simulator.wp_yield_strain).clamp_(min=0.001, max=1.0)
+                        # hardening_factor >= 0 (e.g. 0.0 to 1.0)
+                        wp.to_torch(self.simulator.wp_hardening_factor).clamp_(min=0.0, max=1.0)
 
                     if cfg.data_type == "real":
                         chamfer_loss = wp.to_torch(
@@ -360,6 +389,7 @@ class InvPhyTrainerWarp:
                         # Need to reset the compute graph and clear the gradient
                         self.simulator.tape.reset()
                     self.simulator.clear_loss()
+
                     # Set the intial state for the next step
                     self.simulator.set_init_state(
                         self.simulator.wp_states[-1].wp_x,
@@ -377,7 +407,7 @@ class InvPhyTrainerWarp:
                         total_chamfer_loss if cfg.data_type == "real" else 0
                     ),
                     "track_loss": total_track_loss if cfg.data_type == "real" else 0,
-                    "collide_else": wp.to_torch(
+                    "collide_elas": wp.to_torch(
                         self.simulator.wp_collide_elas, requires_grad=False
                     ).item(),
                     "collide_fric": wp.to_torch(
@@ -389,6 +419,18 @@ class InvPhyTrainerWarp:
                     "collide_object_fric": wp.to_torch(
                         self.simulator.wp_collide_object_fric, requires_grad=False
                     ).item(),
+                    "yield_strain": wp.to_torch(
+                        self.simulator.wp_yield_strain, requires_grad=False
+                    ).item(),
+                    "hardening_factor": wp.to_torch(
+                        self.simulator.wp_hardening_factor, requires_grad=False
+                    ).item(),
+                    "break_strain": wp.to_torch(
+                        self.simulator.wp_break_strain, requires_grad=False
+                    ).item(),
+                    "spring_Y_mean": wp.to_torch(
+                        self.simulator.wp_spring_Y, requires_grad=False
+                    ).mean().item(),
                 },
                 step=i,
             )
@@ -397,15 +439,18 @@ class InvPhyTrainerWarp:
 
             if i % cfg.vis_interval == 0 or i == cfg.iterations - 1:
                 video_path = f"{cfg.base_dir}/train/sim_iter{i}.mp4"
-                self.visualize_sim(save_only=True, video_path=video_path)
+                video_paths_dict = self.visualize_sim(save_only=True, video_path=video_path)
+                
+                wandb_log_payload = {}
+                for key, vid_path in video_paths_dict.items():
+                    wandb_log_payload[key] = wandb.Video(
+                        vid_path,
+                        format="mp4",
+                        fps=cfg.FPS,
+                    )
+
                 wandb.log(
-                    {
-                        "video": wandb.Video(
-                            video_path,
-                            format="mp4",
-                            fps=cfg.FPS,
-                        ),
-                    },
+                    wandb_log_payload,
                     step=i,
                 )
                 # Save the parameters
@@ -532,6 +577,7 @@ class InvPhyTrainerWarp:
             with open(save_path, "wb") as f:
                 pickle.dump(vertices_to_save, f)
 
+        generated_videos = {}
         if not save_only:
             visualize_pc(
                 vertices[:, : self.num_all_points, :],
@@ -541,14 +587,23 @@ class InvPhyTrainerWarp:
             )
         else:
             assert video_path is not None, "Please provide the video path to save"
-            visualize_pc(
-                vertices[:, : self.num_all_points, :],
-                self.object_colors,
-                self.controller_points,
-                visualize=False,
-                save_video=True,
-                save_path=video_path,
-            )
+            
+            # Save a video for each camera
+            base, ext = os.path.splitext(video_path)
+            for cam_idx in range(len(cfg.intrinsics)):
+                cam_video_path = f"{base}_cam{cam_idx}{ext}"
+                visualize_pc(
+                    vertices[:, : self.num_all_points, :],
+                    self.object_colors,
+                    self.controller_points,
+                    visualize=False,
+                    save_video=True,
+                    save_path=cam_video_path,
+                    vis_cam_idx=cam_idx,
+                )
+                generated_videos[f"video_cam_{cam_idx}"] = cam_video_path
+        
+        return generated_videos
 
     def on_press(self, key):
         try:
@@ -937,7 +992,15 @@ class InvPhyTrainerWarp:
         return self.structure_points[min_idx].unsqueeze(0)
 
     def interactive_playground(
-        self, model_path, gs_path, n_ctrl_parts=1, inv_ctrl=False, virtual_key_input=False
+        self,
+        model_path,
+        gs_path=None,
+        n_ctrl_parts=1,
+        inv_ctrl=False,
+        virtual_key_input=False,
+        use_gaussians=True,
+        show_forces=False,
+        force_scale=30000,
     ):
         # Load the model
         logger.info(f"Load model from {model_path}")
@@ -963,6 +1026,67 @@ class InvPhyTrainerWarp:
             collide_object_fric.detach().clone(),
         )
 
+        # Pre-compute force spring data (always needed for force visualization / constant-force control)
+        force_springs_data = None
+        first_frame_controller_points = self.simulator.controller_points[0]
+        force_indexes = []
+        if n_ctrl_parts == 1:
+            force_indexes.append(
+                torch.arange(first_frame_controller_points.shape[0], device=cfg.device)
+            )
+        else:
+            kmeans_force = KMeans(n_clusters=n_ctrl_parts, random_state=0, n_init=10)
+            cluster_labels_force = kmeans_force.fit_predict(
+                first_frame_controller_points.cpu().numpy()
+            )
+            for i in range(n_ctrl_parts):
+                force_indexes.append(
+                    torch.tensor(np.where(cluster_labels_force == i)[0], device=cfg.device)
+                )
+
+        control_springs = self.init_springs[num_object_springs:]
+        force_springs_list = []
+        force_object_points_list = []
+        force_rest_lengths_list = []
+        force_spring_Y_list = []
+
+        for i in range(n_ctrl_parts):
+            f_springs = []
+            f_rest = []
+            f_Y = []
+            f_obj_pts = []
+            for j in range(len(control_springs)):
+                if (control_springs[j][0] - self.num_all_points) in force_indexes[i]:
+                    f_springs.append(control_springs[j])
+                    f_rest.append(self.init_rest_lengths[j + num_object_springs])
+                    f_Y.append(spring_Y[j + num_object_springs])
+                    f_obj_pts.append(control_springs[j][1])
+            f_springs = torch.vstack(f_springs)
+            f_springs[:, 0] -= self.num_all_points
+            force_springs_list.append(f_springs)
+            force_rest_lengths_list.append(torch.tensor(f_rest, device=cfg.device))
+            force_spring_Y_list.append(torch.tensor(f_Y, device=cfg.device))
+            force_object_points_list.append(torch.tensor(f_obj_pts, device=cfg.device))
+
+        force_springs_data = {
+            "springs": force_springs_list,
+            "rest_lengths": force_rest_lengths_list,
+            "spring_Y": force_spring_Y_list,
+            "object_points": force_object_points_list,
+        }
+        # Define force arrow colors per control part
+        force_colors = [(0, 0, 255), (255, 0, 0)]  # Red for left, Blue for right (BGR)
+
+        # Force control mode state (toggled at runtime with F key)
+        force_control_active = False
+        force_target = 50000.0
+        force_target_step = 10000.0  # How much +/- keys adjust the target
+        force_step_gain = 0.0001  # Proportional gain: displacement per unit of force error
+        force_max_step = 0.01    # Maximum displacement per frame in force mode
+        force_min_step = 0.0001  # Minimum displacement per frame in force mode
+        current_force_magnitudes = [0.0] * n_ctrl_parts  # Track measured force per hand
+        max_arrow_px = 120  # Maximum arrow length in pixels
+
         ###########################################################################
 
         logger.info("Party Time Start!!!!")
@@ -984,21 +1108,32 @@ class InvPhyTrainerWarp:
 
         vis_controller_points = current_target.cpu().numpy()
 
-        gaussians = GaussianModel(sh_degree=3)
-        gaussians.load_ply(gs_path)
-        gaussians = remove_gaussians_with_low_opacity(gaussians, 0.1)
-        gaussians.isotropic = True
-        current_pos = gaussians.get_xyz
-        current_rot = gaussians.get_rotation
+        gaussians = None
+        current_pos = None
+        current_rot = None
         use_white_background = True  # set to True for white background
         bg_color = [1, 1, 1] if use_white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-        view = self._create_gs_view(w2c, intrinsic, height, width)
+        view = None
         prev_x = None
         relations = None
         weights = None
+        if use_gaussians:
+            assert gs_path is not None, "gs_path is required when use_gaussians=True"
+            gaussians = GaussianModel(sh_degree=3)
+            gaussians.load_ply(gs_path)
+            gaussians = remove_gaussians_with_low_opacity(gaussians, 0.1)
+            gaussians.isotropic = True
+            current_pos = gaussians.get_xyz
+            current_rot = gaussians.get_rotation
+            view = self._create_gs_view(w2c, intrinsic, height, width)
         image_path = cfg.bg_img_path
         overlay = cv2.imread(image_path)
+        if overlay is None:
+            logger.error(f"Background image not found at {image_path}")
+            overlay = np.zeros((height, width, 3), dtype=np.uint8)
+        else:
+            overlay = cv2.resize(overlay, (width, height))
         overlay = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
         overlay = torch.tensor(overlay, dtype=torch.float32, device=cfg.device)
 
@@ -1032,22 +1167,59 @@ class InvPhyTrainerWarp:
         print("UI Controls:")
         print("- Set 1: WASD (XY movement), QE (Z movement)")
         print("- Set 2: IJKL (XY movement), UO (Z movement)")
+        print("- F: Toggle constant-force control mode")
+        print("- +/-: Adjust target force (in force mode)")
+        print("- V: Toggle force arrow visualization")
         self.inv_ctrl = -1.0 if inv_ctrl else 1.0
+
+        # Calculate coordinate system mapping for intuitive controls
+        # w2c maps World -> Camera. We want to map Camera-relative inputs (e.g. "Up") to World forces.
+        # R (w2c) maps World Vector -> Camera Vector.
+        # We need Inverse R (c2w) to map Camera Vector -> World Vector.
+        R_w2c = w2c[:3, :3]
+        R_c2w = R_w2c.T
+        
+        step_sz = 0.005
+        
+        # Define camera space directions (OpenCV/standard convention assumptions)
+        # Visual Up: -Y (if Y is down), Visual Right: +X, Visual Forward: +Z (or -Z depending on depth)
+        
+        # Camera basis vectors
+        v_right_cam   = np.array([1.0, 0.0, 0.0])
+        v_up_cam      = np.array([0.0, -1.0, 0.0]) # "Up" on screen moves against Y axis
+        v_forward_cam = np.array([0.0, 0.0, 1.0])  # Into scene
+        
+        # Transform to World Space
+        # Apply inv_ctrl to planar movement (horizontal/vertical) to maintain previous behavior if requested
+        v_world_right   = (R_c2w @ v_right_cam) * step_sz * self.inv_ctrl
+        v_world_left    = -v_world_right
+        v_world_up      = (R_c2w @ v_up_cam) * step_sz * self.inv_ctrl
+        v_world_down    = -v_world_up
+        
+        # For depth (Z), we kept it non-inverted in previous code.
+        # "Q" was -0.005 Z, "E" was +0.005 Z.
+        # Let's map Q to "Out" (Backward) and E to "In" (Forward) or customizable.
+        # Assuming Q = Out/Pull, E = In/Push.
+        # If Camera Z is forward (into screen), -Z is out.
+        v_world_in      = (R_c2w @ v_forward_cam) * step_sz
+        v_world_out     = -v_world_in
+
         self.key_mappings = {
             # Set 1 controls
-            "w": (0, np.array([0.005, 0, 0]) * self.inv_ctrl),
-            "s": (0, np.array([-0.005, 0, 0]) * self.inv_ctrl),
-            "a": (0, np.array([0, -0.005, 0]) * self.inv_ctrl),
-            "d": (0, np.array([0, 0.005, 0]) * self.inv_ctrl),
-            "e": (0, np.array([0, 0, 0.005])),
-            "q": (0, np.array([0, 0, -0.005])),
+            "w": (0, v_world_up),
+            "s": (0, v_world_down),
+            "a": (0, v_world_left),
+            "d": (0, v_world_right),
+            "e": (0, v_world_in),   # E -> In/Push (+Z cam)
+            "q": (0, v_world_out),  # Q -> Out/Pull (-Z cam)
+            
             # Set 2 controls
-            "i": (1, np.array([0.005, 0, 0]) * self.inv_ctrl),
-            "k": (1, np.array([-0.005, 0, 0]) * self.inv_ctrl),
-            "j": (1, np.array([0, -0.005, 0]) * self.inv_ctrl),
-            "l": (1, np.array([0, 0.005, 0]) * self.inv_ctrl),
-            "o": (1, np.array([0, 0, 0.005])),
-            "u": (1, np.array([0, 0, -0.005])),
+            "i": (1, v_world_up),
+            "k": (1, v_world_down),
+            "j": (1, v_world_left),
+            "l": (1, v_world_right),
+            "o": (1, v_world_in),
+            "u": (1, v_world_out),
         }
         self.pressed_keys = set()
         self.w2c = w2c
@@ -1176,56 +1348,182 @@ class InvPhyTrainerWarp:
             # 3. Rendering
             render_timer.start()
 
-            # render with gaussians and paste the image on top of the frame
-            results = render_gaussian(view, gaussians, None, background)
-            rendering = results["render"]  # (4, H, W)
-            image = rendering.permute(1, 2, 0).detach()
+            image_mask = None
+            if use_gaussians:
+                # render with gaussians and paste the image on top of the frame
+                results = render_gaussian(view, gaussians, None, background)
+                rendering = results["render"]  # (4, H, W)
+                image = rendering.permute(1, 2, 0).detach()
 
-            render_time = render_timer.stop()
-            component_times["rendering"].append(render_time)
+                render_time = render_timer.stop()
+                component_times["rendering"].append(render_time)
 
-            torch.cuda.synchronize()
+                torch.cuda.synchronize()
 
-            # Continue frame compositing
-            frame_timer.start()
+                # Continue frame compositing
+                frame_timer.start()
 
-            image = image.clamp(0, 1)
-            if use_white_background:
-                image_mask = torch.logical_and(
-                    (image != 1.0).any(dim=2), image[:, :, 3] > 100 / 255
-                )
+                image = image.clamp(0, 1)
+                if use_white_background:
+                    image_mask = torch.logical_and(
+                        (image != 1.0).any(dim=2), image[:, :, 3] > 100 / 255
+                    )
+                else:
+                    image_mask = torch.logical_and(
+                        (image != 0.0).any(dim=2), image[:, :, 3] > 100 / 255
+                    )
+                image[..., 3].masked_fill_(~image_mask, 0.0)
+
+                alpha = image[..., 3:4]
+                rgb = image[..., :3] * 255
+                frame = alpha * rgb + (1 - alpha) * frame
+                frame = frame.cpu().numpy()
+                image_mask = image_mask.cpu().numpy()
+                frame = frame.astype(np.uint8)
             else:
-                image_mask = torch.logical_and(
-                    (image != 0.0).any(dim=2), image[:, :, 3] > 100 / 255
-                )
-            image[..., 3].masked_fill_(~image_mask, 0.0)
+                render_time = render_timer.stop()
+                component_times["rendering"].append(render_time)
+                frame = frame.cpu().numpy().astype(np.uint8)
 
-            alpha = image[..., 3:4]
-            rgb = image[..., :3] * 255
-            frame = alpha * rgb + (1 - alpha) * frame
-            frame = frame.cpu().numpy()
-            image_mask = image_mask.cpu().numpy()
-            frame = frame.astype(np.uint8)
+                # Overlay point cloud when Gaussian rendering is disabled
+                points = x[: self.num_all_points].cpu().numpy()
+                num_points = points.shape[0]
+                max_points = 5000
+                if num_points > max_points:
+                    sample_idx = np.linspace(0, num_points - 1, max_points).astype(int)
+                    points = points[sample_idx]
+
+                ones = np.ones((points.shape[0], 1), dtype=points.dtype)
+                points_h = np.concatenate([points, ones], axis=1)
+                proj = (intrinsic @ (w2c[:3, :] @ points_h.T)).T
+                valid = proj[:, 2] > 1e-6
+                proj = proj[valid]
+                if proj.shape[0] > 0:
+                    u = proj[:, 0] / proj[:, 2]
+                    v = proj[:, 1] / proj[:, 2]
+                    u = u.astype(int)
+                    v = v.astype(int)
+                    in_bounds = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+                    u = u[in_bounds]
+                    v = v[in_bounds]
+                    for px, py in zip(u, v):
+                        cv2.circle(frame, (px, py), 1, (0, 255, 0), -1)
 
             frame = self.update_frame(frame, self.pressed_keys)
 
-            # Add shadows
-            final_shadow = get_simple_shadow(
-                x, intrinsic, w2c, width, height, image_mask, light_point=[0, 0, -3]
-            )
-            frame[final_shadow] = (frame[final_shadow] * 0.95).astype(np.uint8)
-            final_shadow = get_simple_shadow(
-                x, intrinsic, w2c, width, height, image_mask, light_point=[1, 0.5, -2]
-            )
-            frame[final_shadow] = (frame[final_shadow] * 0.97).astype(np.uint8)
-            final_shadow = get_simple_shadow(
-                x, intrinsic, w2c, width, height, image_mask, light_point=[-3, -0.5, -5]
-            )
-            frame[final_shadow] = (frame[final_shadow] * 0.98).astype(np.uint8)
+            # Draw real-time force arrows from contact points
+            if show_forces and force_springs_data is not None and x is not None:
+                proj_mat = intrinsic @ w2c[:3, :]
+                for j in range(n_ctrl_parts):
+                    # Compute the center of contact on the object surface
+                    obj_pts = force_springs_data["object_points"][j]
+                    force_center = torch.mean(x[obj_pts], dim=0)
+                    # Compute the net force vector using spring model
+                    force_vector = self.get_force_vector(
+                        x,
+                        force_springs_data["springs"][j],
+                        force_springs_data["rest_lengths"][j],
+                        force_springs_data["spring_Y"][j],
+                        self.num_all_points,
+                        current_target,
+                    )
+                    force_center_np = force_center.cpu().numpy()
+                    force_vector_np = force_vector.cpu().numpy()
+                    if not (force_vector_np == 0).all():
+                        # Arrow endpoint in 3D
+                        arrow_end = force_center_np + force_vector_np / force_scale
+                        # Project origin and endpoint to 2D
+                        origin_h = np.append(force_center_np, 1.0)
+                        end_h = np.append(arrow_end, 1.0)
+                        p_origin = proj_mat @ origin_h
+                        p_end = proj_mat @ end_h
+                        if p_origin[2] > 1e-6 and p_end[2] > 1e-6:
+                            u0, v0 = int(p_origin[0] / p_origin[2]), int(p_origin[1] / p_origin[2])
+                            u1, v1 = int(p_end[0] / p_end[2]), int(p_end[1] / p_end[2])
+                            # Clamp arrow length to max_arrow_px pixels
+                            dx, dy = u1 - u0, v1 - v0
+                            arrow_len = np.sqrt(dx * dx + dy * dy)
+                            if arrow_len > max_arrow_px:
+                                scale_f = max_arrow_px / arrow_len
+                                u1 = int(u0 + dx * scale_f)
+                                v1 = int(v0 + dy * scale_f)
+                            color = force_colors[j]
+                            cv2.arrowedLine(frame, (u0, v0), (u1, v1), color, 3, tipLength=0.3)
+                            # Draw force magnitude text
+                            force_mag = np.linalg.norm(force_vector_np)
+                            cv2.putText(
+                                frame, f"F={force_mag:.1f}",
+                                (u1 + 5, v1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+                            )
+
+            # Draw force control HUD overlay (always shown so user knows about F key)
+            hud_font = cv2.FONT_HERSHEY_SIMPLEX
+            hud_y = 30
+            if force_control_active:
+                mode_str = "FORCE CTRL"
+                mode_color = (0, 255, 0)  # green (RGB)
+                cv2.putText(frame, f"Mode: {mode_str} [F]", (10, hud_y), hud_font, 0.6, mode_color, 2)
+                hud_y += 25
+                cv2.putText(frame, f"Target: {force_target:.1f} [+/-]", (10, hud_y), hud_font, 0.5, (255, 255, 255), 1)
+                for i in range(n_ctrl_parts):
+                    hud_y += 22
+                    hand_name = ["Left", "Right"][i] if n_ctrl_parts > 1 else "Hand"
+                    f_mag = current_force_magnitudes[i]
+                    # Color: green if near target, red if far
+                    ratio = min(f_mag / max(force_target, 1e-6), 1.5)
+                    if ratio < 0.8:
+                        f_color = (100, 100, 255)  # red-ish (RGB)
+                    elif ratio < 1.2:
+                        f_color = (0, 255, 0)      # green
+                    else:
+                        f_color = (0, 165, 255)     # orange
+                    cv2.putText(frame, f"{hand_name}: F={f_mag:.1f}", (10, hud_y), hud_font, 0.5, f_color, 1)
+            elif show_forces:
+                # Show measured forces in displacement mode when --show_forces is on
+                for i in range(n_ctrl_parts):
+                    hand_name = ["Left", "Right"][i] if n_ctrl_parts > 1 else "Hand"
+                    f_mag = current_force_magnitudes[i]
+                    cv2.putText(frame, f"{hand_name}: F={f_mag:.1f}", (10, hud_y), hud_font, 0.5, (255, 255, 255), 1)
+                    hud_y += 22
+
+            # Add shadows when using gaussian rendering
+            if image_mask is not None:
+                final_shadow = get_simple_shadow(
+                    x, intrinsic, w2c, width, height, image_mask, light_point=[0, 0, -3]
+                )
+                frame[final_shadow] = (frame[final_shadow] * 0.95).astype(np.uint8)
+                final_shadow = get_simple_shadow(
+                    x, intrinsic, w2c, width, height, image_mask, light_point=[1, 0.5, -2]
+                )
+                frame[final_shadow] = (frame[final_shadow] * 0.97).astype(np.uint8)
+                final_shadow = get_simple_shadow(
+                    x, intrinsic, w2c, width, height, image_mask, light_point=[-3, -0.5, -5]
+                )
+                frame[final_shadow] = (frame[final_shadow] * 0.98).astype(np.uint8)
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
             cv2.imshow("Interactive Playground", frame)
             key = cv2.waitKey(1)
+
+            # Handle force control mode keys (F toggle, +/- adjust target, V toggle arrows)
+            if key != -1:
+                key_char = chr(key & 0xFF)
+                if key_char in ('f', 'F'):
+                    force_control_active = not force_control_active
+                    if force_control_active:
+                        show_forces = True  # Auto-enable arrows when entering force mode
+                    mode_str = "FORCE CONTROL" if force_control_active else "DISPLACEMENT"
+                    print(f"\n>>> Mode switched to: {mode_str} (target={force_target:.1f})")
+                elif key_char in ('+', '='):
+                    force_target += force_target_step
+                    print(f">>> Target force: {force_target:.1f}")
+                elif key_char == '-':
+                    force_target = max(0.0, force_target - force_target_step)
+                    print(f">>> Target force: {force_target:.1f}")
+                elif key_char in ('v', 'V'):
+                    show_forces = not show_forces
+                    print(f">>> Force arrows: {'ON' if show_forces else 'OFF'}")
 
             if virtual_key_input:
                 # Handle virtual keyboard input through OpenCV window
@@ -1260,7 +1558,7 @@ class InvPhyTrainerWarp:
 
             torch.cuda.synchronize()
 
-            if prev_x is not None:
+            if use_gaussians and prev_x is not None:
                 with torch.no_grad():
 
                     prev_particle_pos = prev_x
@@ -1305,6 +1603,60 @@ class InvPhyTrainerWarp:
 
             prev_target = current_target
             target_change = self.get_target_change()
+
+            # In force-control mode, adapt the displacement to maintain target force
+            if force_control_active and force_springs_data is not None:
+                for i in range(n_ctrl_parts):
+                    # Get the raw direction from key input (already scaled by step_sz)
+                    direction = target_change[i] if n_ctrl_parts > 1 else target_change[0]
+                    dir_norm = np.linalg.norm(direction)
+                    if dir_norm < 1e-8:
+                        # No key pressed for this hand — don't move
+                        if n_ctrl_parts > 1:
+                            target_change[i] = np.zeros(3)
+                        else:
+                            target_change[0] = np.zeros(3)
+                        continue
+                    # Unit direction the user wants to push
+                    dir_unit = direction / dir_norm
+                    # Compute current force magnitude for this hand
+                    force_vec = self.get_force_vector(
+                        x,
+                        force_springs_data["springs"][i],
+                        force_springs_data["rest_lengths"][i],
+                        force_springs_data["spring_Y"][i],
+                        self.num_all_points,
+                        current_target,
+                    )
+                    cur_force_mag = torch.norm(force_vec).item()
+                    current_force_magnitudes[i] = cur_force_mag
+                    # Proportional controller: error = target - current
+                    force_error = force_target - cur_force_mag
+                    # Adaptive step: move more if below target, less/stop if at/above
+                    adaptive_step = np.clip(
+                        force_error * force_step_gain,
+                        -force_max_step,  # allow slight retraction if overshooting
+                        force_max_step,
+                    )
+                    # Only move forward (in pressed direction) if error > 0; retract if overshooting
+                    if n_ctrl_parts > 1:
+                        target_change[i] = dir_unit * max(adaptive_step, 0.0)
+                    else:
+                        target_change[0] = dir_unit * max(adaptive_step, 0.0)
+            else:
+                # Update measured forces for HUD even in displacement mode
+                if force_springs_data is not None:
+                    for i in range(n_ctrl_parts):
+                        force_vec = self.get_force_vector(
+                            x,
+                            force_springs_data["springs"][i],
+                            force_springs_data["rest_lengths"][i],
+                            force_springs_data["spring_Y"][i],
+                            self.num_all_points,
+                            current_target,
+                        )
+                        current_force_magnitudes[i] = torch.norm(force_vec).item()
+
             if masks_ctrl_pts is not None:
                 for i in range(n_ctrl_parts):
                     if masks_ctrl_pts[i].sum() > 0:

@@ -47,8 +47,19 @@ class Config:
         self.track_weight = 1.0
         self.acc_weight = 0.01
 
+        self.yield_strain = 0.1
+        self.hardening_factor = 0.0
+
+        # Breakage parameters
+        self.break_strain = 0.5
+        self.enable_breakage = False
+
         # Other parameters for visualization
         self.overlay_path = None
+
+        # Flag to toggle the plasticity model
+        self.enable_plasticity = False
+        self.sim_method = "spring_mass"  # Options: "spring_mass", "xpbd"
 
     def to_dict(self):
         # Convert the class to dictionary

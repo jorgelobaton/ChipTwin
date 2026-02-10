@@ -1,6 +1,6 @@
 from qqtt.data import RealData, SimpleData
 from qqtt.utils import logger, visualize_pc, cfg
-from qqtt.model.diff_simulator import SpringMassSystemWarp
+from qqtt.model.diff_simulator import SpringMassSystemWarp, XPBDSimulatorWarp
 import open3d as o3d
 import numpy as np
 import torch
@@ -207,7 +207,7 @@ class OptimizerCMA:
         )
         init_object_radius = self.normalize(cfg.object_radius, 0.01, 0.05)
         init_object_max_neighbours = self.normalize(cfg.object_max_neighbours, 10, 50)
-        init_controller_radius = self.normalize(cfg.controller_radius, 0.01, 0.08)
+        init_controller_radius = self.normalize(cfg.controller_radius, 0.01, 0.15)
         init_controller_max_neighbours = self.normalize(
             cfg.controller_max_neighbours, 10, 80
         )
@@ -216,8 +216,10 @@ class OptimizerCMA:
         init_collide_object_elas = cfg.collide_object_elas
         init_collide_object_fric = self.normalize(cfg.collide_object_fric, 0, 2)
         init_collision_dist = self.normalize(cfg.collision_dist, 0.01, 0.05)
-        init_drag_damping = self.normalize(cfg.drag_damping, 0, 20)
+        init_drag_damping = self.normalize(cfg.drag_damping, 0, 100)
         init_dashpot_damping = self.normalize(cfg.dashpot_damping, 0, 200)
+        init_hardening_factor = cfg.hardening_factor
+        init_yield_strain = self.normalize(cfg.yield_strain, 0.01, 0.5)
 
         x_init = [
             init_global_spring_Y,
@@ -232,6 +234,8 @@ class OptimizerCMA:
             init_collision_dist,
             init_drag_damping,
             init_dashpot_damping,
+            init_hardening_factor,
+            init_yield_strain,
         ]
 
         self.error_func(
@@ -253,15 +257,17 @@ class OptimizerCMA:
         )
         final_object_radius = self.denormalize(optimal_x[1], 0.01, 0.05)
         final_object_max_neighbours = int(self.denormalize(optimal_x[2], 10, 50))
-        final_controller_radius = self.denormalize(optimal_x[3], 0.01, 0.08)
+        final_controller_radius = self.denormalize(optimal_x[3], 0.01, 0.15)
         final_controller_max_neighbours = int(self.denormalize(optimal_x[4], 10, 80))
         final_collide_elas = optimal_x[5]
         final_collide_fric = self.denormalize(optimal_x[6], 0, 2)
         final_collide_object_elas = optimal_x[7]
         final_collide_object_fric = self.denormalize(optimal_x[8], 0, 2)
         final_collision_dist = self.denormalize(optimal_x[9], 0.01, 0.05)
-        final_drag_damping = self.denormalize(optimal_x[10], 0, 20)
+        final_drag_damping = self.denormalize(optimal_x[10], 0, 100)
         final_dashpot_damping = self.denormalize(optimal_x[11], 0, 200)
+        final_hardening_factor = optimal_x[12]
+        final_yield_strain = self.denormalize(optimal_x[13], 0.01, 0.5)
 
         self.error_func(
             optimal_x,
@@ -282,6 +288,8 @@ class OptimizerCMA:
         optimal_results["collision_dist"] = final_collision_dist
         optimal_results["drag_damping"] = final_drag_damping
         optimal_results["dashpot_damping"] = final_dashpot_damping
+        optimal_results["hardening_factor"] = final_hardening_factor
+        optimal_results["yield_strain"] = final_yield_strain
 
         # Save out all the initialized parameters
         with open(f"{cfg.base_dir}/optimal_params.pkl", "wb") as f:
@@ -293,15 +301,18 @@ class OptimizerCMA:
         )
         object_radius = self.denormalize(parameters[1], 0.01, 0.05)
         object_max_neighbours = int(self.denormalize(parameters[2], 10, 50))
-        controller_radius = self.denormalize(parameters[3], 0.01, 0.08)
+        controller_radius = self.denormalize(parameters[3], 0.01, 0.15)
         controller_max_neighbours = int(self.denormalize(parameters[4], 10, 80))
         collide_elas = parameters[5]
         collide_fric = self.denormalize(parameters[6], 0, 2)
         collide_object_elas = parameters[7]
         collide_object_fric = self.denormalize(parameters[8], 0, 2)
         collision_dist = self.denormalize(parameters[9], 0.01, 0.05)
-        drag_damping = self.denormalize(parameters[10], 0, 20)
+        drag_damping = self.denormalize(parameters[10], 0, 100)
         dashpot_damping = self.denormalize(parameters[11], 0, 200)
+
+        hardening_factor = parameters[12] if len(parameters) > 12 else 0.0
+        yield_strain = self.denormalize(parameters[13], 0.01, 0.5) if len(parameters) > 13 else cfg.yield_strain
 
         # Initialize the vertices, springs, rest lengths and masses
         if self.controller_points is None:
@@ -324,7 +335,12 @@ class OptimizerCMA:
             mask=self.init_masks,
         )
 
-        self.simulator = SpringMassSystemWarp(
+        if cfg.sim_method == "xpbd":
+            SimulatorClass = XPBDSimulatorWarp
+        else:
+            SimulatorClass = SpringMassSystemWarp
+
+        self.simulator = SimulatorClass(
             self.init_vertices,
             self.init_springs,
             self.init_rest_lengths,
@@ -353,6 +369,9 @@ class OptimizerCMA:
             gt_object_motions_valid=self.object_motions_valid,
             self_collision=cfg.self_collision,
             disable_backward=True,
+            yield_strain=yield_strain,
+            hardening_factor=hardening_factor,
+            enable_plasticity=cfg.enable_plasticity,
         )
 
         self.simulator.set_init_state(

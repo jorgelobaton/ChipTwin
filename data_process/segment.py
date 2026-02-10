@@ -16,12 +16,13 @@ args = parser.parse_args()
 base_path = args.base_path
 case_name = args.case_name
 TEXT_PROMPT = args.TEXT_PROMPT
-camera_num = len(glob.glob(f"{base_path}/{case_name}/depth/*"))
+# List all subdirectories in depth/ to get camera IDs (names)
+camera_ids = sorted([os.path.basename(p) for p in glob.glob(f"{base_path}/{case_name}/depth/*")])
 print(f"Processing {case_name}")
 
-for camera_idx in range(camera_num):
-    print(f"Processing {case_name} camera {camera_idx}")
+for cam_id in camera_ids:
+    print(f"Processing {case_name} camera {cam_id}")
     os.system(
-        f"python ./data_process/segment_util_video.py --base_path {base_path} --case_name {case_name} --TEXT_PROMPT '{TEXT_PROMPT}' --camera_idx {camera_idx}"
+        f"python ./data_process/segment_util_video.py --base_path {base_path} --case_name {case_name} --TEXT_PROMPT '{TEXT_PROMPT}' --camera_id {cam_id}"
     )
     os.system(f"rm -rf {base_path}/{case_name}/tmp_data")

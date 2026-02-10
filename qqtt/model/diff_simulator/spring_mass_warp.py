@@ -60,7 +60,7 @@ def copy_float(data: wp.array(dtype=wp.float32), origin: wp.array(dtype=wp.float
     origin[tid] = data[tid]
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=True)
 def set_control_points(
     num_substeps: int,
     original_control_point: wp.array(dtype=wp.vec3),
@@ -596,6 +596,11 @@ class SpringMassSystemWarp:
         gt_object_motions_valid=None,
         self_collision=False,
         disable_backward=False,
+        yield_strain=0.1,
+        hardening_factor=0.0,
+        enable_plasticity=False,
+        break_strain=0.5,
+        enable_breakage=False,
     ):
         logger.info(f"[SIMULATION]: Initialize the Spring-Mass System")
         self.device = cfg.device
@@ -687,8 +692,10 @@ class SpringMassSystemWarp:
             init_springs, dtype=wp.vec2i, requires_grad=False
         )
         self.wp_rest_lengths = wp.from_torch(
-            init_rest_lengths, dtype=wp.float32, requires_grad=False
+            init_rest_lengths, dtype=wp.float32, requires_grad=True
         )
+        # Save a copy of original rest lengths to reset at each training epoch
+        self.wp_init_rest_lengths = wp.clone(self.wp_rest_lengths, requires_grad=False)
         self.wp_masses = wp.from_torch(
             init_masses[:num_object_points], dtype=wp.float32, requires_grad=False
         )
@@ -765,6 +772,22 @@ class SpringMassSystemWarp:
             requires_grad=cfg.collision_learn,
         )
 
+        self.wp_yield_strain = wp.from_torch(
+            torch.tensor([yield_strain], dtype=torch.float32, device=self.device),
+            requires_grad=True,
+        )
+        self.wp_hardening_factor = wp.from_torch(
+            torch.tensor([hardening_factor], dtype=torch.float32, device=self.device),
+            requires_grad=True,
+        )
+        self.enable_plasticity = enable_plasticity
+        
+        self.wp_break_strain = wp.from_torch(
+            torch.tensor([break_strain], dtype=torch.float32, device=self.device),
+            requires_grad=True,
+        )
+        self.enable_breakage = enable_breakage
+
         # Create the CUDA graph to acclerate
         if cfg.use_graph:
             if cfg.data_type == "real":
@@ -772,7 +795,8 @@ class SpringMassSystemWarp:
                     with wp.ScopedCapture() as capture:
                         self.tape = wp.Tape()
                         with self.tape:
-                            self.step()
+                            self._step_plasticity()
+                            self._step_core()
                             self.calculate_loss()
                         self.tape.backward(self.loss)
                 else:
@@ -786,7 +810,8 @@ class SpringMassSystemWarp:
                     with wp.ScopedCapture() as capture:
                         self.tape = wp.Tape()
                         with self.tape:
-                            self.step()
+                            self._step_plasticity()
+                            self._step_core()
                             self.calculate_simple_loss()
                         self.tape.backward(self.loss)
                 else:
@@ -900,6 +925,15 @@ class SpringMassSystemWarp:
                 outputs=[self.wp_states[0].wp_v],
             )
 
+    def reset_rest_lengths(self):
+        """Reset rest_lengths to their initial values (undo plasticity from previous epoch)."""
+        wp.launch(
+            copy_float,
+            dim=self.n_springs,
+            inputs=[self.wp_init_rest_lengths],
+            outputs=[self.wp_rest_lengths],
+        )
+
     def set_acc_count(self, acc_count):
         if acc_count:
             input = 1
@@ -939,7 +973,10 @@ class SpringMassSystemWarp:
             outputs=[self.wp_collision_indices, self.wp_collision_number],
         )
 
-    def step(self):
+    def _step_core(self):
+        """Core differentiable simulation: springs, collisions, integration.
+        Does NOT include plasticity/breakage (non-differentiable in-place ops).
+        """
         for i in range(self.num_substeps):
             self.wp_states[i].clear_forces()
             if not self.controller_points is None:
@@ -1029,6 +1066,52 @@ class SpringMassSystemWarp:
                 ],
                 outputs=[self.wp_states[i + 1].wp_x, self.wp_states[i + 1].wp_v],
             )
+
+    def _step_plasticity(self):
+        """Apply plasticity & breakage ONCE using the final substep positions.
+        Safe to run inside the tape: rest_lengths are only modified AFTER all
+        substeps have finished, so the backward pass through eval_springs
+        within each substep sees unmodified rest_lengths.
+        yield_strain and hardening_factor gradients flow through this kernel.
+        """
+        if self.enable_plasticity:
+            wp.launch(
+                kernel=self.update_plasticity_kernel,
+                dim=self.n_springs,
+                inputs=[
+                    self.wp_states[-1].wp_x,
+                    self.wp_springs,
+                    self.wp_rest_lengths,
+                    self.wp_yield_strain,
+                    self.wp_hardening_factor,
+                    self.num_object_points,
+                    self.wp_states[-2].wp_control_x if self.controller_points is not None else self.wp_states[-1].wp_x,
+                ],
+            )
+
+        if self.enable_breakage:
+            wp.launch(
+                kernel=self.update_breakage_kernel,
+                dim=self.n_springs,
+                inputs=[
+                    self.wp_states[-1].wp_x,
+                    self.wp_springs,
+                    self.wp_rest_lengths,
+                    self.wp_spring_Y,
+                    self.wp_break_strain,
+                    self.num_object_points,
+                    self.wp_states[-2].wp_control_x if self.controller_points is not None else self.wp_states[-1].wp_x,
+                ],
+            )
+
+    def step(self):
+        """Full forward step: plasticity/breakage + differentiable core.
+        Plasticity runs first to update rest_lengths based on current state,
+        then _step_core uses the updated rest_lengths for spring forces.
+        """
+        self._step_plasticity()
+        self._step_core()
+
 
     def calculate_loss(self):
         # Compute the chamfer loss
@@ -1158,3 +1241,106 @@ class SpringMassSystemWarp:
             inputs=[collide_object_fric],
             outputs=[self.wp_collide_object_fric],
         )
+
+    @wp.kernel
+    def update_plasticity_kernel(
+        x: wp.array(dtype=wp.vec3),
+        springs: wp.array(dtype=wp.vec2i),
+        rest_lengths: wp.array(dtype=float),
+        yield_strain_arr: wp.array(dtype=float),
+        hardening_factor_arr: wp.array(dtype=float),
+        num_object_points: int,
+        control_x: wp.array(dtype=wp.vec3),
+    ):
+        tid = wp.tid()
+        idx1 = springs[tid][0]
+        idx2 = springs[tid][1]
+
+        if idx1 >= num_object_points:
+            x1 = control_x[idx1 - num_object_points]
+        else:
+            x1 = x[idx1]
+
+        if idx2 >= num_object_points:
+            x2 = control_x[idx2 - num_object_points]
+        else:
+            x2 = x[idx2]
+
+        dis = x2 - x1
+        dis_len = wp.length(dis)
+
+        rest = rest_lengths[tid]
+
+        yield_strain = yield_strain_arr[0]
+        hardening_factor = hardening_factor_arr[0]
+
+        if rest > 1e-6:
+            strain = (dis_len / rest) - 1.0
+
+            # Smooth differentiable plasticity using softplus activation.
+            # softplus(x, k) = ln(1 + exp(k*x)) / k  approximates max(x, 0) smoothly.
+            # k controls sharpness: k=50 gives a smooth transition around the yield point.
+            # This is branchless (CUDA graph compatible) and fully differentiable,
+            # allowing gradients to flow through yield_strain and hardening_factor.
+            k = 50.0
+
+            # Positive plasticity: strain > yield_strain (tension)
+            excess_pos_arg = wp.clamp(k * (strain - yield_strain), -20.0, 20.0)
+            alpha_pos = wp.log(1.0 + wp.exp(excess_pos_arg)) / k
+
+            # Negative plasticity: -strain > yield_strain (compression)
+            excess_neg_arg = wp.clamp(k * (-strain - yield_strain), -20.0, 20.0)
+            alpha_neg = wp.log(1.0 + wp.exp(excess_neg_arg)) / k
+
+            target_rest_pos = dis_len / (1.0 + yield_strain)
+            target_rest_neg = dis_len / (1.0 - wp.clamp(yield_strain, 0.0, 0.99))
+
+            # Scale alpha by a normalized factor so the update magnitude is proportional
+            # to the excess strain, not the absolute alpha value.
+            abs_strain = wp.abs(strain) + 1e-6
+            w_pos = alpha_pos / (alpha_pos + abs_strain)
+            w_neg = alpha_neg / (alpha_neg + abs_strain)
+
+            delta_pos = hardening_factor * w_pos * (target_rest_pos - rest)
+            delta_neg = hardening_factor * w_neg * (target_rest_neg - rest)
+
+            rest_lengths[tid] = rest + delta_pos + delta_neg
+
+    @wp.kernel
+    def update_breakage_kernel(
+        x: wp.array(dtype=wp.vec3),
+        springs: wp.array(dtype=wp.vec2i),
+        rest_lengths: wp.array(dtype=float),
+        spring_Y: wp.array(dtype=float),
+        break_strain_arr: wp.array(dtype=float),
+        num_object_points: int,
+        control_x: wp.array(dtype=wp.vec3),
+    ):
+        tid = wp.tid()
+        idx1 = springs[tid][0]
+        idx2 = springs[tid][1]
+
+        if idx1 >= num_object_points:
+            x1 = control_x[idx1 - num_object_points]
+        else:
+            x1 = x[idx1]
+
+        if idx2 >= num_object_points:
+            x2 = control_x[idx2 - num_object_points]
+        else:
+            x2 = x[idx2]
+
+        dis = x2 - x1
+        dis_len = wp.length(dis)
+
+        rest = rest_lengths[tid]
+        
+        break_strain = break_strain_arr[0]
+        
+        if rest > 1e-6:
+            strain = (dis_len / rest) - 1.0
+            
+            # If strain exceeds break limit, disable the spring by setting stiffness (Y) to very low value
+            if wp.abs(strain) > break_strain:
+                # Assuming spring_Y is log-stiffness, set to -100 (exp(-100) ~ 0)
+                spring_Y[tid] = -100.0

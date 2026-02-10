@@ -28,6 +28,9 @@ if __name__ == "__main__":
     parser.add_argument("--base_path", type=str, required=True)
     parser.add_argument("--case_name", type=str, required=True)
     parser.add_argument("--train_frame", type=int, required=True)
+    parser.add_argument("--hardening_factor", type=float, default=None)
+    parser.add_argument("--enable_plasticity", action="store_true")
+    parser.add_argument("--sim_method", type=str, default="spring_mass", choices=["spring_mass", "xpbd"])
     args = parser.parse_args()
 
     base_path = args.base_path
@@ -41,10 +44,10 @@ if __name__ == "__main__":
 
     print(f"[DATA TYPE]: {cfg.data_type}")
 
-    base_dir = f"experiments/{case_name}"
+    base_dir = f"experiments/{case_name}_ep" if args.enable_plasticity else f"experiments/{case_name}"
 
     # Read the first-satage optimized parameters
-    optimal_path = f"experiments_optimization/{case_name}/optimal_params.pkl"
+    optimal_path = f"experiments_optimization/{case_name}_ep/optimal_params.pkl" if args.enable_plasticity else f"experiments_optimization/{case_name}/optimal_params.pkl"
     assert os.path.exists(
         optimal_path
     ), f"{case_name}: Optimal parameters not found: {optimal_path}"
@@ -63,6 +66,16 @@ if __name__ == "__main__":
     cfg.intrinsics = np.array(data["intrinsics"])
     cfg.WH = data["WH"]
     cfg.overlay_path = f"{base_path}/{case_name}/color"
+    if "camera_ids" in data:
+        cfg.camera_ids = data["camera_ids"]
+
+    # Override config with command line arguments
+    if args.hardening_factor is not None:
+        cfg.hardening_factor = args.hardening_factor
+    if args.enable_plasticity:
+        cfg.enable_plasticity = True
+    if args.sim_method:
+        cfg.sim_method = args.sim_method
 
     logger.set_log_file(path=base_dir, name="inv_phy_log")
     trainer = InvPhyTrainerWarp(

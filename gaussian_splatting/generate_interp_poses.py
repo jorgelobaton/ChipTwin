@@ -73,22 +73,29 @@ if __name__ == '__main__':
     root_dir = "./data/gaussian_data"
     for scene_name in sorted(os.listdir(root_dir)):
         scene_dir = os.path.join(root_dir, scene_name)
+        if not os.path.isdir(scene_dir):
+            continue
         print(f'Processing {scene_name}')
         camera_path = os.path.join(scene_dir, 'camera_meta.pkl')
+        if not os.path.exists(camera_path):
+            continue
+            
         with open(camera_path, 'rb') as f:
             camera_meta = pickle.load(f)
         c2ws = camera_meta['c2ws']
-        pose_0 = c2ws[0]
-        pose_1 = c2ws[1]
-        pose_2 = c2ws[2]
+        num_cams = len(c2ws)
         n_interp = 50
-        poses_01 = np.stack([pose_0, pose_1], 0)[:, :3, :]
-        interp_poses_01 = generate_interpolated_path(poses_01, n_interp)
-        poses_12 = np.stack([pose_1, pose_2], 0)[:, :3, :]
-        interp_poses_12 = generate_interpolated_path(poses_12, n_interp)
-        poses_20 = np.stack([pose_2, pose_0], 0)[:, :3, :]
-        interp_poses_20 = generate_interpolated_path(poses_20, n_interp)
-        interp_poses = np.concatenate([interp_poses_01, interp_poses_12, interp_poses_20], 0)
-        output_poses = [np.vstack([pose, np.array([0, 0, 0, 1])]) for pose in interp_poses]
+        
+        interp_poses_list = []
+        for i in range(num_cams):
+            pose_start = c2ws[i]
+            pose_end = c2ws[(i + 1) % num_cams]
+            
+            poses = np.stack([pose_start, pose_end], 0)[:, :3, :]
+            interp_poses = generate_interpolated_path(poses, n_interp)
+            interp_poses_list.append(interp_poses)
+            
+        all_interp_poses = np.concatenate(interp_poses_list, 0)
+        output_poses = [np.vstack([pose, np.array([0, 0, 0, 1])]) for pose in all_interp_poses]
         pickle.dump(output_poses, open(os.path.join(scene_dir, 'interp_poses.pkl'), 'wb'))
         

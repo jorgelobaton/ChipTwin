@@ -95,21 +95,44 @@ def getPcdFromDepth(depth, intrinsic):
     return points
 
 
-def get_pcd_from_data(path, frame_idx, num_cam, intrinsics, c2ws):
+def get_pcd_from_data(path, frame_idx, camera_ids, intrinsics, c2ws, caps=None, depth_scales=None):
     total_points = []
     total_colors = []
     total_masks = []
-    for i in range(num_cam):
-        color = cv2.imread(f"{path}/color/{i}/{frame_idx}.png")
+    for i, cam_id in enumerate(camera_ids):
+        if caps is not None and cam_id in caps:
+            ret, color = caps[cam_id].read()
+            if not ret:
+                print(f"Warning: Could not read frame {frame_idx} from {cam_id}")
+                # Fallback to zeros if needed, or handle error
+                color = np.zeros((intrinsics[i][1, 2]*2, intrinsics[i][0, 2]*2, 3), dtype=np.uint8)
+        else:
+            # Fallback for individual PNGs if they exist
+            color = cv2.imread(f"{path}/color/{cam_id}/{frame_idx}.png")
+            if color is None:
+                # Fallback to video if cap was not provided but file is missing
+                cap = cv2.VideoCapture(f"{path}/color/{cam_id}.mp4")
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, color = cap.read()
+                cap.release()
+
+        if color is None:
+            raise FileNotFoundError(
+                f"Missing color frame {frame_idx} for camera '{cam_id}'. Check {path}/color/{cam_id}/ or {path}/color/{cam_id}.mp4"
+            )
         color = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
         color = color.astype(np.float32) / 255.0
-        depth = np.load(f"{path}/depth/{i}/{frame_idx}.npy") / 1000.0
+        depth_raw = np.load(f"{path}/depth/{cam_id}/{frame_idx}.npy")
+        scale = 0.001
+        if depth_scales is not None and len(depth_scales) > i:
+            scale = float(depth_scales[i])
+        depth = depth_raw.astype(np.float32) * scale
 
         points = getPcdFromDepth(
             depth,
             intrinsic=intrinsics[i],
         )
-        masks = np.logical_and(points[:, :, 2] > 0.2, points[:, :, 2] < 1.5)
+        masks = np.logical_and(points[:, :, 2] > 0.05, points[:, :, 2] < 1.5)
         points_flat = points.reshape(-1, 3)
         # Transform points to world coordinates using homogeneous transformation
         homogeneous_points = np.hstack(
@@ -160,20 +183,99 @@ if __name__ == "__main__":
         data = json.load(f)
     intrinsics = np.array(data["intrinsics"])
     WH = data["WH"]
+    depth_scales = data.get("depth_scales")
+    
+    # Get camera IDs (Human readable names)
+    camera_ids = data.get("camera_ids", data.get("serial_numbers", []))
+    original_ids = list(camera_ids)
+
+    def _sorted_dirs(path):
+        if not os.path.exists(path):
+            return []
+        dirs = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+        # numeric sort if possible
+        if all(d.isdigit() for d in dirs):
+            return sorted(dirs, key=lambda x: int(x))
+        return sorted(dirs)
+
+    # Prefer actual folder names if metadata IDs don't match
+    color_dir = os.path.join(base_path, case_name, "color")
+    depth_dir = os.path.join(base_path, case_name, "depth")
+    color_ids = _sorted_dirs(color_dir)
+    depth_ids = _sorted_dirs(depth_dir)
+    actual_ids = color_ids if color_ids else depth_ids
+    if actual_ids and set(camera_ids) != set(actual_ids):
+        print("[WARN] Metadata camera IDs do not match folder names; using folder names instead.")
+        camera_ids = actual_ids
+
+        # Reorder intrinsics/depth_scales if we can map by original IDs
+        if original_ids and len(original_ids) == len(intrinsics):
+            id_to_index = {cid: idx for idx, cid in enumerate(original_ids)}
+            indices = []
+            for cid in camera_ids:
+                if cid in id_to_index:
+                    indices.append(id_to_index[cid])
+                else:
+                    # Try matching by suffix (e.g. D405_XXXX vs serial)
+                    matches = [idx for oid, idx in id_to_index.items() if str(oid) in cid]
+                    indices.append(matches[0] if matches else None)
+            if any(idx is None for idx in indices):
+                print("[WARN] Unable to fully map intrinsics to folder IDs; using original order.")
+            else:
+                intrinsics = intrinsics[indices]
+                if depth_scales is not None:
+                    depth_scales = [depth_scales[i] for i in indices]
+    num_cam = len(camera_ids)
     
     # Infer frame count if not present in metadata
     if "frame_num" in data:
         frame_num = data["frame_num"]
     else:
         # Check first camera depth folder to count frames
-        depth_files = glob.glob(f"{base_path}/{case_name}/depth/0/*.npy")
+        depth_files = glob.glob(f"{base_path}/{case_name}/depth/{camera_ids[0]}/*.npy")
         frame_num = len(depth_files)
-        print(f"Metadata missing 'frame_num'. Inferred {frame_num} frames from camera 0.")
+        print(f"Metadata missing 'frame_num'. Inferred {frame_num} frames from camera {camera_ids[0]}.")
 
-    print(data["serial_numbers"])
+    print(f"Cameras: {camera_ids}")
 
-    num_cam = len(intrinsics)
-    c2ws = pickle.load(open(f"{base_path}/{case_name}/calibrate.pkl", "rb"))
+    calib_path = f"{base_path}/{case_name}/calibrate.pkl"
+    if not os.path.exists(calib_path):
+        calib_path = "calibrate.pkl"
+        print(f"Case-specific calibration not found. Using global {calib_path}")
+        
+    c2ws_data = pickle.load(open(calib_path, "rb"))
+    if isinstance(c2ws_data, dict):
+        if "c2ws_by_id" in c2ws_data:
+            missing_ids = [cid for cid in camera_ids if cid not in c2ws_data["c2ws_by_id"]]
+            if missing_ids:
+                raise ValueError(f"Calibration missing camera IDs: {missing_ids}")
+            c2ws = [c2ws_data["c2ws_by_id"][cid] for cid in camera_ids]
+        elif "camera_ids" in c2ws_data and "c2ws" in c2ws_data:
+            calib_ids = c2ws_data["camera_ids"]
+            calib_c2ws = c2ws_data["c2ws"]
+            id_to_c2w = {cid: calib_c2ws[idx] for idx, cid in enumerate(calib_ids)}
+            missing_ids = [cid for cid in camera_ids if cid not in id_to_c2w]
+            if missing_ids:
+                raise ValueError(f"Calibration missing camera IDs: {missing_ids}")
+            c2ws = [id_to_c2w[cid] for cid in camera_ids]
+        else:
+            raise ValueError("Unsupported calibration format. Expected camera_id mapping or ordered list.")
+    else:
+        c2ws = c2ws_data
+        # If we swapped camera_ids, attempt to reorder c2ws from original ids
+        if original_ids and camera_ids != original_ids and len(c2ws) == len(original_ids):
+            id_to_index = {cid: idx for idx, cid in enumerate(original_ids)}
+            indices = []
+            for cid in camera_ids:
+                if cid in id_to_index:
+                    indices.append(id_to_index[cid])
+                else:
+                    matches = [idx for oid, idx in id_to_index.items() if str(oid) in cid]
+                    indices.append(matches[0] if matches else None)
+            if any(idx is None for idx in indices):
+                print("[WARN] Unable to fully map c2ws to folder IDs; using original order.")
+            else:
+                c2ws = [c2ws[i] for i in indices]
 
     exist_dir(f"{base_path}/{case_name}/pcd")
 
@@ -199,10 +301,18 @@ if __name__ == "__main__":
     coordinate = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
     vis.add_geometry(coordinate)
 
+    # Open video captures for sequential reading
+    caps = {}
+    for cam_id in camera_ids:
+        video_file = f"{base_path}/{case_name}/color/{cam_id}.mp4"
+        if os.path.exists(video_file):
+            caps[cam_id] = cv2.VideoCapture(video_file)
+            print(f"Opened video for camera {cam_id}")
+
     pcd = None
     for i in tqdm(range(frame_num)):
         points, colors, masks = get_pcd_from_data(
-            f"{base_path}/{case_name}", i, num_cam, intrinsics, c2ws
+            f"{base_path}/{case_name}", i, camera_ids, intrinsics, c2ws, caps=caps, depth_scales=depth_scales
         )
 
         if i == 0:
@@ -237,3 +347,7 @@ if __name__ == "__main__":
             colors=colors,
             masks=masks,
         )
+
+    # Close video captures
+    for cap in caps.values():
+        cap.release()

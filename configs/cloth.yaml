@@ -27,3 +27,5 @@ collision_learn: true
 chamfer_weight: 1.0
 track_weight: 1.0
 self_collision: true
+yield_strain: 0.1
+hardening_factor: 0.0

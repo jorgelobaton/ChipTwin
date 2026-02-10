@@ -19,7 +19,7 @@ parser.add_argument(
 parser.add_argument("--case_name", type=str, required=True)
 parser.add_argument("--shape_prior", action="store_true", default=False)
 parser.add_argument("--num_surface_points", type=int, default=1024)
-parser.add_argument("--volume_sample_size", type=float, default=0.005)
+parser.add_argument("--volume_sample_size", type=float, default=0.002)
 args = parser.parse_args()
 
 base_path = args.base_path
@@ -53,7 +53,7 @@ def process_unique_points(track_data):
     object_motions_valid = object_motions_valid[:, unique_idx]
 
     # Make sure all points are above the ground
-    object_points[object_points[..., 2] > 0, 2] = 0
+    # object_points[object_points[..., 2] > 0, 2] = 0
 
     if SHAPE_PRIOR:
         shape_mesh_path = f"{base_path}/{case_name}/shape/matching/final_mesh.glb"
@@ -205,11 +205,14 @@ def visualize_track(track_data):
                 )
                 vis.add_geometry(controller_meshes[-1])
                 prev_center.append(origin)
-            # Adjust the viewpoint
+            # Adjust the viewpoint to center on the object
+            bbox = object_pcd.get_axis_aligned_bounding_box()
+            center = bbox.get_center()
             view_control = vis.get_view_control()
+            view_control.set_lookat(center)
             view_control.set_front([1, 0, -2])
             view_control.set_up([0, 0, -1])
-            view_control.set_zoom(1)
+            view_control.set_zoom(0.8)
         else:
             render_object_pcd.points = o3d.utility.Vector3dVector(object_pcd.points)
             render_object_pcd.colors = o3d.utility.Vector3dVector(object_pcd.colors)
@@ -219,8 +222,8 @@ def visualize_track(track_data):
                 controller_meshes[j].translate(origin - prev_center[j])
                 vis.update_geometry(controller_meshes[j])
                 prev_center[j] = origin
-            vis.poll_events()
-            vis.update_renderer()
+        vis.poll_events()
+        vis.update_renderer()
 
         frame = np.asarray(vis.capture_screen_float_buffer(do_render=True))
         frame = (frame * 255).astype(np.uint8)

@@ -87,35 +87,12 @@ if PROCESS_SEG:
 
 
 if PROCESS_SHAPE_PRIOR and SHAPE_PRIOR:
-    # Get the mask path for the image
-    with open(f"{base_path}/{case_name}/mask/mask_info_{0}.json", "r") as f:
-        data = json.load(f)
-    obj_idx = None
-    for key, value in data.items():
-        if value != CONTROLLER_NAME:
-            if obj_idx is not None:
-                raise ValueError("More than one object detected.")
-            obj_idx = int(key)
-    mask_path = f"{base_path}/{case_name}/mask/0/{obj_idx}/0.png"
-
-    existDir(f"{base_path}/{case_name}/shape")
-    # Get the high-resolution of the image to prepare for the trellis generation
-    with Timer("Image Upscale"):
-        if not os.path.isfile(f"{base_path}/{case_name}/shape/high_resolution.png"):
-            os.system(
-                f"python ./data_process/image_upscale.py --img_path {base_path}/{case_name}/color/0/0.png --mask_path {mask_path} --output_path {base_path}/{case_name}/shape/high_resolution.png --category {category}"
-            )
-
-    # Get the masked image of the object
-    with Timer("Image Segmentation"):
-        os.system(
-            f"python ./data_process/segment_util_image.py --img_path {base_path}/{case_name}/shape/high_resolution.png --TEXT_PROMPT '{category}' --output_path {base_path}/{case_name}/shape/masked_image.png"
-        )
-
-    with Timer("Shape Prior Generation"):
-        os.system(
-            f"python ./data_process/shape_prior.py --img_path {base_path}/{case_name}/shape/masked_image.png --output_dir {base_path}/{case_name}/shape"
-        )
+    # Shape prior from point cloud (replaces Trellis + alignment)
+    # NOTE: This runs after PROCESS_3D because it needs track_process_data.pkl.
+    #       The old Trellis pipeline (image_upscale -> segment_util_image -> shape_prior.py -> align.py)
+    #       is no longer needed. This directly produces shape/matching/final_mesh.glb from the
+    #       observed shell points, which data_process_sample.py consumes.
+    pass  # Actual execution deferred until after PROCESS_3D (see below)
 
 if PROCESS_TRACK:
     # Get the dense tracking of the object using Co-tracker
@@ -144,10 +121,11 @@ if PROCESS_3D:
         )
 
 if PROCESS_ALIGN and SHAPE_PRIOR:
-    # Align the shape prior with partial observation
-    with Timer("Alignment"):
+    # Generate shape prior from observed point cloud shell (replaces Trellis + alignment)
+    # Creates a watertight alpha-shape mesh from the tracked object points
+    with Timer("Shape Prior from PCD"):
         os.system(
-            f"python ./data_process/align.py --base_path {base_path} --case_name {case_name} --controller_name {CONTROLLER_NAME}"
+        f"python ./data_process/shape_prior_pcd.py --base_path {base_path} --case_name {case_name}"
         )
 
 if PROCESS_FINAL:
