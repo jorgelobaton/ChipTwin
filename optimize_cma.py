@@ -48,8 +48,6 @@ if __name__ == "__main__":
     else:
         cfg.load_from_yaml("configs/real.yaml")
 
-    base_dir = f"experiments_optimization/{case_name}_ep" if cfg.enable_plasticity else f"experiments_optimization/{case_name}"
-
     # Set the intrinsic and extrinsic parameters for visualization
     with open(f"{base_path}/{case_name}/calibrate.pkl", "rb") as f:
         c2ws = pickle.load(f)
@@ -75,6 +73,8 @@ if __name__ == "__main__":
         cfg.enable_plasticity = True
     if args.sim_method:
         cfg.sim_method = args.sim_method
+
+    base_dir = f"experiments_optimization/{case_name}_ep" if cfg.enable_plasticity else f"experiments_optimization/{case_name}"
 
     logger.set_log_file(path=base_dir, name="optimize_cma_log")
     optimizer = OptimizerCMA(

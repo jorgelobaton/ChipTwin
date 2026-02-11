@@ -60,6 +60,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--force_scale", type=float, default=30000, help="scale factor for force arrow visualization"
     )
+    parser.add_argument("--enable_plasticity", action="store_true")
     args = parser.parse_args()
 
     base_path = args.base_path
@@ -73,7 +74,7 @@ if __name__ == "__main__":
     base_dir = f"./temp_experiments/{case_name}"
 
     # Read the first-satage optimized parameters to set the indifferentiable parameters
-    optimal_path = f"./experiments_optimization/{case_name}/optimal_params.pkl"
+    optimal_path = f"./experiments_optimization/{case_name}_ep/optimal_params.pkl" if args.enable_plasticity else f"./experiments_optimization/{case_name}/optimal_params.pkl"
     logger.info(f"Load optimal parameters from: {optimal_path}")
     assert os.path.exists(
         optimal_path
@@ -93,6 +94,8 @@ if __name__ == "__main__":
     cfg.intrinsics = np.array(data["intrinsics"])
     cfg.WH = data["WH"]
     cfg.bg_img_path = args.bg_img_path
+    if args.enable_plasticity:
+        cfg.enable_plasticity = True
 
     gaussians_path = None
     if not args.no_gaussian_rendering:

@@ -18,6 +18,7 @@ def visualize_pc(
     save_video=False,
     save_path=None,
     vis_cam_idx=0,
+    hide_fill_points=False,
 ):
     # Deprecated function, use visualize_pc instead
     FPS = cfg.FPS
@@ -43,21 +44,25 @@ def visualize_pc(
         )
     else:
         if object_colors.shape[1] < object_points.shape[1]:
-            # If the object_colors is not the same as object_points, fill the colors with black
-            object_colors = np.concatenate(
-                [
-                    object_colors,
-                    np.ones(
-                        (
-                            object_colors.shape[0],
-                            object_points.shape[1] - object_colors.shape[1],
-                            3,
+            if hide_fill_points:
+                # Truncate object_points to match object_colors so fill points are invisible
+                object_points = object_points[:, : object_colors.shape[1], :]
+            else:
+                # Pad colors with grey for fill points
+                object_colors = np.concatenate(
+                    [
+                        object_colors,
+                        np.ones(
+                            (
+                                object_colors.shape[0],
+                                object_points.shape[1] - object_colors.shape[1],
+                                3,
+                            )
                         )
-                    )
-                    * 0.3,
-                ],
-                axis=1,
-            )
+                        * 0.3,
+                    ],
+                    axis=1,
+                )
 
     # The pcs is a 4d pcd numpy array with shape (n_frames, n_points, 3)
     vis = o3d.visualization.Visualizer()

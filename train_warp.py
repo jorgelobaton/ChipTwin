@@ -31,6 +31,10 @@ if __name__ == "__main__":
     parser.add_argument("--hardening_factor", type=float, default=None)
     parser.add_argument("--enable_plasticity", action="store_true")
     parser.add_argument("--sim_method", type=str, default="spring_mass", choices=["spring_mass", "xpbd"])
+    parser.add_argument("--chamfer_weight", type=float, default=None)
+    parser.add_argument("--track_weight", type=float, default=None)
+    parser.add_argument("--acc_weight", type=float, default=None)
+    parser.add_argument("--comment", type=str, default=None, help="Comment to tag the wandb run for easier identification")
     args = parser.parse_args()
 
     base_path = args.base_path
@@ -38,13 +42,13 @@ if __name__ == "__main__":
     train_frame = args.train_frame
 
     if "cloth" in case_name or "package" in case_name:
-        cfg.load_from_yaml("configs/cloth.yaml")
+        config_yaml_path = "configs/cloth.yaml"
     else:
-        cfg.load_from_yaml("configs/real.yaml")
+        config_yaml_path = "configs/real.yaml"
+    cfg.load_from_yaml(config_yaml_path)
+    cfg.config_yaml_path = os.path.abspath(config_yaml_path)
 
     print(f"[DATA TYPE]: {cfg.data_type}")
-
-    base_dir = f"experiments/{case_name}_ep" if args.enable_plasticity else f"experiments/{case_name}"
 
     # Read the first-satage optimized parameters
     optimal_path = f"experiments_optimization/{case_name}_ep/optimal_params.pkl" if args.enable_plasticity else f"experiments_optimization/{case_name}/optimal_params.pkl"
@@ -76,6 +80,16 @@ if __name__ == "__main__":
         cfg.enable_plasticity = True
     if args.sim_method:
         cfg.sim_method = args.sim_method
+    if args.chamfer_weight is not None:
+        cfg.chamfer_weight = args.chamfer_weight
+    if args.track_weight is not None:
+        cfg.track_weight = args.track_weight
+    if args.acc_weight is not None:
+        cfg.acc_weight = args.acc_weight
+
+    cfg.comment = args.comment
+
+    base_dir = f"experiments/{case_name}_ep" if args.enable_plasticity else f"experiments/{case_name}"
 
     logger.set_log_file(path=base_dir, name="inv_phy_log")
     trainer = InvPhyTrainerWarp(

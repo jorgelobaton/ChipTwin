@@ -75,75 +75,51 @@ python optimize_cma.py --base_path ./data/different_types --case_name <demo_fold
 ### 7. **Train Physics Model**
 ```bash
 python train_warp.py --case_name <demo_folder>
+python train_warp.py --base_path ./data/different_types --case_name <demo> --train_frame 76 --enable_plasticity --comment ""
 ```
 
 ---
 
 ### 8. **Interactive Playground (Optional)**
 ```bash
-python interactive_playground.py --case_name <demo_folder> --bg_img_path ./data/bg_1280x720.png
-```
-
-### 9) **Run inference / rollout (physics)**
-
-```bash
-python inference_warp.py --base_path ./data/different_types --case_name <demo_folder>
+python interactive_playground.py --case_name <demo_folder> --bg_img_path ./data/bg_1280x720.png --enable_plasticity
 ```
 
 ---
 
-### 10) **Render predictions (GS render)**
-After physics inference, you usually render the predicted states using your Gaussian Splatting model:
-
+### 9. **Physics Inference (Rollout)**
+*Generate a full trajectory from a trained model.*
 ```bash
-python gs_render.py --case_name <demo_folder>
+python inference_warp.py --base_path ./data/different_types --case_name <demo_folder> --enable_plasticity
 ```
 
-If you’re rendering dynamics / video outputs:
+---
 
+### 10. **Render Physics Predictions**
+*Render the simulated trajectory using Gaussian Splatting.*
 ```bash
+python gs_render.py --case_name <demo_folder>
+# or for dynamic sequences
 python gs_render_dynamics.py --case_name <demo_folder>
 ```
 
 ---
 
-### 11) **Export render/eval data**
-You have several export utilities that prepare data for evaluation/visualization:
-
+### 11. **Evaluation Metrics**
+*Evaluate predicted trajectories against GT (Chamfer and Tracking).*
 ```bash
-python export_render_eval_data.py --base_path ./data/different_types --case_name <demo_folder>
-```
+# Run Chamfer evaluation across all experiments
+python evaluate_chamfer.py
 
-Optional (depending on the pipeline run):
-```bash
-python export_gaussian_data.py --base_path ./data/different_types --case_name <demo_folder>   # (already in your list)
-python export_gaussian_data.py --help
+# Run Tracking evaluation
+python evaluate_track.py
 ```
+*Results will be saved in `results/final_results.csv` and `results/final_track.csv`.*
 
 ---
 
-### 12) **Evaluation (metrics)**
-You have explicit evaluation scripts in the repo root:
-
-**Chamfer evaluation**
-```bash
-python evaluate_chamfer.py --base_path ./data/different_types --case_name <demo_folder>
-```
-
-**Tracking evaluation**
-```bash
-python evaluate_track.py --base_path ./data/different_types --case_name <demo_folder>
-```
-
-```bash
-bash evaluate.sh
-```
-
----
-
-### 13) **Visualization helpers (optional but useful)**
-These aren’t “evaluation metrics” but they’re often part of the workflow to sanity-check results:
-
+### 12. **Visualization Helpers**
+*Optional tools to visualize specific results.*
 ```bash
 python visualize_render_results.py --case_name <demo_folder>
 python visualize_material.py --case_name <demo_folder>
@@ -152,5 +128,5 @@ python visualize_force.py --case_name <demo_folder>
 
 ---
 
-
 Replace `<demo_folder>` and `<your_category>` with your actual demo name and category.
+Use `--enable_plasticity` for sequences with elastoplastic behavior.

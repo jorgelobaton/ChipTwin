@@ -162,38 +162,61 @@ class InvPhyTrainerWarp:
         )
 
         if not pure_inference_mode:
+            param_groups = [
+                {"params": [
+                    wp.to_torch(self.simulator.wp_spring_Y),
+                    wp.to_torch(self.simulator.wp_collide_elas),
+                    wp.to_torch(self.simulator.wp_collide_fric),
+                    wp.to_torch(self.simulator.wp_collide_object_elas),
+                    wp.to_torch(self.simulator.wp_collide_object_fric),
+                ]},
+            ]
+            if cfg.enable_plasticity:
+                param_groups.append({"params": [
+                    wp.to_torch(self.simulator.wp_yield_strain),
+                    wp.to_torch(self.simulator.wp_hardening_factor),
+                ], "lr": cfg.base_lr * 0.1})
             self.optimizer = torch.optim.Adam(
-                [
-                    {"params": [
-                        wp.to_torch(self.simulator.wp_spring_Y),
-                        wp.to_torch(self.simulator.wp_collide_elas),
-                        wp.to_torch(self.simulator.wp_collide_fric),
-                        wp.to_torch(self.simulator.wp_collide_object_elas),
-                        wp.to_torch(self.simulator.wp_collide_object_fric),
-                    ]},
-                    {"params": [
-                        wp.to_torch(self.simulator.wp_yield_strain),
-                        wp.to_torch(self.simulator.wp_hardening_factor),
-                    ], "lr": cfg.base_lr * 0.1},
-                ],
+                param_groups,
                 lr=cfg.base_lr,
                 betas=(0.9, 0.99),
             )
+
+            run_name = cfg.run_name
+            wandb_notes = None
+            if hasattr(cfg, 'comment') and cfg.comment:
+                run_name = f"{cfg.run_name} | {cfg.comment}"
+                wandb_notes = cfg.comment
 
             if "debug" not in cfg.run_name:
                 wandb.init(
                     # set the wandb project where this run will be logged
                     project="final_pipeline",
-                    name=cfg.run_name,
+                    name=run_name,
+                    notes=wandb_notes,
                     config=cfg.to_dict(),
                 )
             else:
                 wandb.init(
                     # set the wandb project where this run will be logged
                     project="Debug",
-                    name=cfg.run_name,
+                    name=run_name,
+                    notes=wandb_notes,
                     config=cfg.to_dict(),
                 )
+
+            # Log the complete config YAML file as a wandb artifact
+            if hasattr(cfg, 'config_yaml_path') and os.path.exists(cfg.config_yaml_path):
+                config_artifact = wandb.Artifact(
+                    name="config_yaml",
+                    type="config",
+                    description="Complete config YAML file used for this run",
+                )
+                config_artifact.add_file(cfg.config_yaml_path)
+                wandb.log_artifact(config_artifact)
+                # Also log raw YAML content as a text summary for quick viewing
+                with open(cfg.config_yaml_path, "r") as _f:
+                    wandb.run.summary["config_yaml_content"] = _f.read()
             if not os.path.exists(f"{cfg.base_dir}/train"):
                 # Create directory if it doesn't exist
                 os.makedirs(f"{cfg.base_dir}/train")
@@ -363,11 +386,10 @@ class InvPhyTrainerWarp:
                     self.optimizer.step()
 
                     # Clamp plasticity parameters to valid ranges to prevent instability/NaNs
-                    with torch.no_grad():
-                        # yield_strain > 0 (e.g. 0.001 to 1.0)
-                        wp.to_torch(self.simulator.wp_yield_strain).clamp_(min=0.001, max=1.0)
-                        # hardening_factor >= 0 (e.g. 0.0 to 1.0)
-                        wp.to_torch(self.simulator.wp_hardening_factor).clamp_(min=0.0, max=1.0)
+                    if cfg.enable_plasticity:
+                        with torch.no_grad():
+                            wp.to_torch(self.simulator.wp_yield_strain).clamp_(min=0.001, max=1.0)
+                            wp.to_torch(self.simulator.wp_hardening_factor).clamp_(min=0.0, max=1.0)
 
                     if cfg.data_type == "real":
                         chamfer_loss = wp.to_torch(
@@ -543,6 +565,11 @@ class InvPhyTrainerWarp:
         logger.info("Visualizing the simulation")
         # Visualize the whole simulation using current set of parameters in the physical simulator
         frame_len = self.dataset.frame_len
+
+        # Reset rest_lengths before visualization so plasticity starts from original state
+        if self.simulator.enable_plasticity or self.simulator.enable_breakage:
+            self.simulator.reset_rest_lengths()
+
         self.simulator.set_init_state(
             self.simulator.wp_init_vertices, self.simulator.wp_init_velocities
         )
@@ -591,6 +618,7 @@ class InvPhyTrainerWarp:
             # Save a video for each camera
             base, ext = os.path.splitext(video_path)
             for cam_idx in range(len(cfg.intrinsics)):
+                # With grey fill points
                 cam_video_path = f"{base}_cam{cam_idx}{ext}"
                 visualize_pc(
                     vertices[:, : self.num_all_points, :],
@@ -600,8 +628,23 @@ class InvPhyTrainerWarp:
                     save_video=True,
                     save_path=cam_video_path,
                     vis_cam_idx=cam_idx,
+                    hide_fill_points=False,
                 )
                 generated_videos[f"video_cam_{cam_idx}"] = cam_video_path
+
+                # Without fill points (transparent)
+                nofill_video_path = f"{base}_cam{cam_idx}_nofill{ext}"
+                visualize_pc(
+                    vertices[:, : self.num_all_points, :],
+                    self.object_colors,
+                    self.controller_points,
+                    visualize=False,
+                    save_video=True,
+                    save_path=nofill_video_path,
+                    vis_cam_idx=cam_idx,
+                    hide_fill_points=True,
+                )
+                generated_videos[f"video_cam_{cam_idx}_nofill"] = nofill_video_path
         
         return generated_videos
 

@@ -218,8 +218,6 @@ class OptimizerCMA:
         init_collision_dist = self.normalize(cfg.collision_dist, 0.01, 0.05)
         init_drag_damping = self.normalize(cfg.drag_damping, 0, 100)
         init_dashpot_damping = self.normalize(cfg.dashpot_damping, 0, 200)
-        init_hardening_factor = cfg.hardening_factor
-        init_yield_strain = self.normalize(cfg.yield_strain, 0.01, 0.5)
 
         x_init = [
             init_global_spring_Y,
@@ -234,9 +232,13 @@ class OptimizerCMA:
             init_collision_dist,
             init_drag_damping,
             init_dashpot_damping,
-            init_hardening_factor,
-            init_yield_strain,
         ]
+
+        if cfg.enable_plasticity:
+            init_hardening_factor = cfg.hardening_factor
+            init_yield_strain = self.normalize(cfg.yield_strain, 0.01, 0.5)
+            x_init.append(init_hardening_factor)
+            x_init.append(init_yield_strain)
 
         self.error_func(
             x_init, visualize=True, video_path=f"{cfg.base_dir}/optimizeCMA/init.mp4"
@@ -266,8 +268,13 @@ class OptimizerCMA:
         final_collision_dist = self.denormalize(optimal_x[9], 0.01, 0.05)
         final_drag_damping = self.denormalize(optimal_x[10], 0, 100)
         final_dashpot_damping = self.denormalize(optimal_x[11], 0, 200)
-        final_hardening_factor = optimal_x[12]
-        final_yield_strain = self.denormalize(optimal_x[13], 0.01, 0.5)
+
+        if cfg.enable_plasticity:
+            final_hardening_factor = optimal_x[12]
+            final_yield_strain = self.denormalize(optimal_x[13], 0.01, 0.5)
+        else:
+            final_hardening_factor = cfg.hardening_factor
+            final_yield_strain = cfg.yield_strain
 
         self.error_func(
             optimal_x,
@@ -311,8 +318,12 @@ class OptimizerCMA:
         drag_damping = self.denormalize(parameters[10], 0, 100)
         dashpot_damping = self.denormalize(parameters[11], 0, 200)
 
-        hardening_factor = parameters[12] if len(parameters) > 12 else 0.0
-        yield_strain = self.denormalize(parameters[13], 0.01, 0.5) if len(parameters) > 13 else cfg.yield_strain
+        if cfg.enable_plasticity:
+            hardening_factor = parameters[12]
+            yield_strain = self.denormalize(parameters[13], 0.01, 0.5)
+        else:
+            hardening_factor = cfg.hardening_factor
+            yield_strain = cfg.yield_strain
 
         # Initialize the vertices, springs, rest lengths and masses
         if self.controller_points is None:
@@ -435,13 +446,33 @@ class OptimizerCMA:
 
         if visualize == True:
             vertices = torch.stack(vertices, dim=0)
-            visualize_pc(
-                vertices[:, : self.num_all_points, :],
-                self.object_colors,
-                self.controller_points,
-                visualize=False,
-                save_video=True,
-                save_path=video_path,
-            )
+            # Save a video for each camera (with and without fill points)
+            base, ext = os.path.splitext(video_path)
+            for cam_idx in range(len(cfg.intrinsics)):
+                # With grey fill points
+                cam_video_path = f"{base}_cam{cam_idx}{ext}"
+                visualize_pc(
+                    vertices[:, : self.num_all_points, :],
+                    self.object_colors,
+                    self.controller_points,
+                    visualize=False,
+                    save_video=True,
+                    save_path=cam_video_path,
+                    vis_cam_idx=cam_idx,
+                    hide_fill_points=False,
+                )
+
+                # Without fill points (transparent)
+                nofill_video_path = f"{base}_cam{cam_idx}_nofill{ext}"
+                visualize_pc(
+                    vertices[:, : self.num_all_points, :],
+                    self.object_colors,
+                    self.controller_points,
+                    visualize=False,
+                    save_video=True,
+                    save_path=nofill_video_path,
+                    vis_cam_idx=cam_idx,
+                    hide_fill_points=True,
+                )
 
         return total_loss
