@@ -29,6 +29,8 @@ if __name__ == "__main__":
     parser.add_argument("--base_path", type=str, required=True)
     parser.add_argument("--case_name", type=str, required=True)
     parser.add_argument("--enable_plasticity", action="store_true")
+    parser.add_argument("--enable_breakage", action="store_true")
+    parser.add_argument("--break_strain", type=float, default=None)
     args = parser.parse_args()
 
     base_path = args.base_path
@@ -41,10 +43,17 @@ if __name__ == "__main__":
 
     logger.info(f"[DATA TYPE]: {cfg.data_type}")
 
-    base_dir = f"experiments/{case_name}_ep" if args.enable_plasticity else f"experiments/{case_name}"
+    # Build experiment directory suffix based on enabled features
+    suffix = ""
+    if args.enable_plasticity:
+        suffix += "_ep"
+    if args.enable_breakage:
+        suffix += "_brk"
+
+    base_dir = f"experiments/{case_name}{suffix}"
 
     # Read the first-satage optimized parameters to set the indifferentiable parameters
-    optimal_path = f"experiments_optimization/{case_name}_ep/optimal_params.pkl" if args.enable_plasticity else f"experiments_optimization/{case_name}/optimal_params.pkl"
+    optimal_path = f"experiments_optimization/{case_name}{suffix}/optimal_params.pkl"
     logger.info(f"Load optimal parameters from: {optimal_path}")
     assert os.path.exists(
         optimal_path
@@ -69,6 +78,10 @@ if __name__ == "__main__":
 
     if args.enable_plasticity:
         cfg.enable_plasticity = True
+    if args.enable_breakage:
+        cfg.enable_breakage = True
+    if args.break_strain is not None:
+        cfg.break_strain = args.break_strain
 
     logger.set_log_file(path=base_dir, name="inference_log")
     trainer = InvPhyTrainerWarp(
@@ -78,4 +91,4 @@ if __name__ == "__main__":
     )
     assert len(glob.glob(f"{base_dir}/train/best_*.pth")) > 0
     best_model_path = glob.glob(f"{base_dir}/train/best_*.pth")[0]
-    trainer.test(best_model_path)
+    trainer.test(best_model_path, case_name=case_name)

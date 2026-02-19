@@ -159,6 +159,7 @@ class InvPhyTrainerWarp:
             enable_plasticity=cfg.enable_plasticity,
             break_strain=cfg.break_strain,
             enable_breakage=cfg.enable_breakage,
+            max_stretch_ratio=cfg.max_stretch_ratio,
         )
 
         if not pure_inference_mode:
@@ -172,9 +173,14 @@ class InvPhyTrainerWarp:
                 ]},
             ]
             if cfg.enable_plasticity:
+                # Per-spring yield_strain and hardening_factor
                 param_groups.append({"params": [
                     wp.to_torch(self.simulator.wp_yield_strain),
                     wp.to_torch(self.simulator.wp_hardening_factor),
+                ], "lr": cfg.base_lr * 0.1})
+            if cfg.enable_breakage:
+                param_groups.append({"params": [
+                    wp.to_torch(self.simulator.wp_break_strain),
                 ], "lr": cfg.base_lr * 0.1})
             self.optimizer = torch.optim.Adam(
                 param_groups,
@@ -390,6 +396,9 @@ class InvPhyTrainerWarp:
                         with torch.no_grad():
                             wp.to_torch(self.simulator.wp_yield_strain).clamp_(min=0.001, max=1.0)
                             wp.to_torch(self.simulator.wp_hardening_factor).clamp_(min=0.0, max=1.0)
+                    if cfg.enable_breakage:
+                        with torch.no_grad():
+                            wp.to_torch(self.simulator.wp_break_strain).clamp_(min=0.05, max=2.0)
 
                     if cfg.data_type == "real":
                         chamfer_loss = wp.to_torch(
@@ -418,6 +427,10 @@ class InvPhyTrainerWarp:
                         self.simulator.wp_states[-1].wp_v,
                     )
 
+            # Snapshot learned spring_Y so next epoch's reset preserves optimizer progress
+            if self.simulator.enable_breakage:
+                self.simulator.update_init_spring_Y()
+
             total_loss /= cfg.train_frame - 1
             if cfg.data_type == "real":
                 total_chamfer_loss /= cfg.train_frame - 1
@@ -441,12 +454,18 @@ class InvPhyTrainerWarp:
                     "collide_object_fric": wp.to_torch(
                         self.simulator.wp_collide_object_fric, requires_grad=False
                     ).item(),
-                    "yield_strain": wp.to_torch(
+                    "yield_strain_mean": wp.to_torch(
                         self.simulator.wp_yield_strain, requires_grad=False
-                    ).item(),
-                    "hardening_factor": wp.to_torch(
+                    ).mean().item(),
+                    "yield_strain_std": wp.to_torch(
+                        self.simulator.wp_yield_strain, requires_grad=False
+                    ).std().item(),
+                    "hardening_factor_mean": wp.to_torch(
                         self.simulator.wp_hardening_factor, requires_grad=False
-                    ).item(),
+                    ).mean().item(),
+                    "hardening_factor_std": wp.to_torch(
+                        self.simulator.wp_hardening_factor, requires_grad=False
+                    ).std().item(),
                     "break_strain": wp.to_torch(
                         self.simulator.wp_break_strain, requires_grad=False
                     ).item(),
@@ -494,6 +513,17 @@ class InvPhyTrainerWarp:
                     "collide_object_fric": wp.to_torch(
                         self.simulator.wp_collide_object_fric, requires_grad=False
                     ),
+                    "yield_strain": wp.to_torch(
+                        self.simulator.wp_yield_strain, requires_grad=False
+                    ).clone(),
+                    "hardening_factor": wp.to_torch(
+                        self.simulator.wp_hardening_factor, requires_grad=False
+                    ).clone(),
+                    "break_strain": wp.to_torch(
+                        self.simulator.wp_break_strain, requires_grad=False
+                    ).item(),
+                    "enable_breakage": cfg.enable_breakage,
+                    "enable_plasticity": cfg.enable_plasticity,
                     "optimizer_state_dict": self.optimizer.state_dict(),
                 }
                 if best_loss == None or total_loss < best_loss:
@@ -523,18 +553,47 @@ class InvPhyTrainerWarp:
 
         wandb.finish()
 
-    def test(self, model_path=None):
+    def test(self, model_path=None, case_name=None):
         if model_path is not None:
             # Load the model
             logger.info(f"Load model from {model_path}")
             checkpoint = torch.load(model_path, map_location=cfg.device)
 
-            spring_Y = checkpoint["spring_Y"]
-            collide_elas = checkpoint["collide_elas"]
-            collide_fric = checkpoint["collide_fric"]
-            collide_object_elas = checkpoint["collide_object_elas"]
-            collide_object_fric = checkpoint["collide_object_fric"]
-            num_object_springs = checkpoint["num_object_springs"]
+            is_multi = checkpoint.get("multi_experiment", False)
+
+            if is_multi:
+                # Multi-experiment checkpoint: load per-experiment spring_Y
+                assert case_name is not None, (
+                    "case_name is required when loading a multi-experiment checkpoint"
+                )
+                per_exp_spring_Y = checkpoint["per_experiment_spring_Y"]
+                assert case_name in per_exp_spring_Y, (
+                    f"case_name '{case_name}' not found in multi-experiment checkpoint. "
+                    f"Available: {list(per_exp_spring_Y.keys())}"
+                )
+                spring_Y = per_exp_spring_Y[case_name]
+                collide_elas = checkpoint["collide_elas"]
+                collide_fric = checkpoint["collide_fric"]
+                collide_object_elas = checkpoint["collide_object_elas"]
+                collide_object_fric = checkpoint["collide_object_fric"]
+
+                # Per-experiment, per-spring plasticity params (if available)
+                if "per_experiment_yield_strain" in checkpoint:
+                    per_exp_ys = checkpoint["per_experiment_yield_strain"]
+                    if case_name in per_exp_ys:
+                        checkpoint["yield_strain"] = per_exp_ys[case_name]
+                if "per_experiment_hardening_factor" in checkpoint:
+                    per_exp_hf = checkpoint["per_experiment_hardening_factor"]
+                    if case_name in per_exp_hf:
+                        checkpoint["hardening_factor"] = per_exp_hf[case_name]
+            else:
+                # Single-experiment checkpoint
+                spring_Y = checkpoint["spring_Y"]
+                collide_elas = checkpoint["collide_elas"]
+                collide_fric = checkpoint["collide_fric"]
+                collide_object_elas = checkpoint["collide_object_elas"]
+                collide_object_fric = checkpoint["collide_object_fric"]
+                num_object_springs = checkpoint["num_object_springs"]
 
             assert (
                 len(spring_Y) == self.simulator.n_springs
@@ -548,6 +607,23 @@ class InvPhyTrainerWarp:
                 collide_object_elas.detach().clone(),
                 collide_object_fric.detach().clone(),
             )
+            # Load break_strain if saved in checkpoint
+            if "break_strain" in checkpoint:
+                self.simulator.set_break_strain(checkpoint["break_strain"])
+
+            # Load per-spring plasticity parameters if saved in checkpoint
+            if "yield_strain" in checkpoint:
+                self.simulator.set_yield_strain(
+                    checkpoint["yield_strain"].detach().clone()
+                    if isinstance(checkpoint["yield_strain"], torch.Tensor)
+                    else checkpoint["yield_strain"]
+                )
+            if "hardening_factor" in checkpoint:
+                self.simulator.set_hardening_factor(
+                    checkpoint["hardening_factor"].detach().clone()
+                    if isinstance(checkpoint["hardening_factor"], torch.Tensor)
+                    else checkpoint["hardening_factor"]
+                )
 
         # Render the initial visualization
         video_path = f"{cfg.base_dir}/inference.mp4"
@@ -1042,19 +1118,37 @@ class InvPhyTrainerWarp:
         inv_ctrl=False,
         virtual_key_input=False,
         use_gaussians=True,
-        show_forces=False,
         force_scale=30000,
+        case_name=None,
     ):
         # Load the model
         logger.info(f"Load model from {model_path}")
         checkpoint = torch.load(model_path, map_location=cfg.device)
 
-        spring_Y = checkpoint["spring_Y"]
-        collide_elas = checkpoint["collide_elas"]
-        collide_fric = checkpoint["collide_fric"]
-        collide_object_elas = checkpoint["collide_object_elas"]
-        collide_object_fric = checkpoint["collide_object_fric"]
-        num_object_springs = checkpoint["num_object_springs"]
+        is_multi = checkpoint.get("multi_experiment", False)
+
+        if is_multi:
+            assert case_name is not None, (
+                "case_name is required when loading a multi-experiment checkpoint"
+            )
+            per_exp_spring_Y = checkpoint["per_experiment_spring_Y"]
+            assert case_name in per_exp_spring_Y, (
+                f"case_name '{case_name}' not found in multi-experiment checkpoint. "
+                f"Available: {list(per_exp_spring_Y.keys())}"
+            )
+            spring_Y = per_exp_spring_Y[case_name]
+            collide_elas = checkpoint["collide_elas"]
+            collide_fric = checkpoint["collide_fric"]
+            collide_object_elas = checkpoint["collide_object_elas"]
+            collide_object_fric = checkpoint["collide_object_fric"]
+            num_object_springs = checkpoint["per_experiment_num_object_springs"][case_name]
+        else:
+            spring_Y = checkpoint["spring_Y"]
+            collide_elas = checkpoint["collide_elas"]
+            collide_fric = checkpoint["collide_fric"]
+            collide_object_elas = checkpoint["collide_object_elas"]
+            collide_object_fric = checkpoint["collide_object_fric"]
+            num_object_springs = checkpoint["num_object_springs"]
 
         assert (
             len(spring_Y) == self.simulator.n_springs
@@ -1068,6 +1162,9 @@ class InvPhyTrainerWarp:
             collide_object_elas.detach().clone(),
             collide_object_fric.detach().clone(),
         )
+
+        if "break_strain" in checkpoint:
+            self.simulator.set_break_strain(checkpoint["break_strain"].detach().clone())
 
         # Pre-compute force spring data (always needed for force visualization / constant-force control)
         force_springs_data = None
@@ -1122,6 +1219,7 @@ class InvPhyTrainerWarp:
 
         # Force control mode state (toggled at runtime with F key)
         force_control_active = False
+        show_force_arrows = True  # V key toggles arrow drawing (HUD always shown)
         force_target = 50000.0
         force_target_step = 10000.0  # How much +/- keys adjust the target
         force_step_gain = 0.0001  # Proportional gain: displacement per unit of force error
@@ -1212,7 +1310,7 @@ class InvPhyTrainerWarp:
         print("- Set 2: IJKL (XY movement), UO (Z movement)")
         print("- F: Toggle constant-force control mode")
         print("- +/-: Adjust target force (in force mode)")
-        print("- V: Toggle force arrow visualization")
+        print("- V: Toggle force arrow visualization on/off")
         self.inv_ctrl = -1.0 if inv_ctrl else 1.0
 
         # Calculate coordinate system mapping for intuitive controls
@@ -1454,8 +1552,8 @@ class InvPhyTrainerWarp:
 
             frame = self.update_frame(frame, self.pressed_keys)
 
-            # Draw real-time force arrows from contact points
-            if show_forces and force_springs_data is not None and x is not None:
+            # Always draw real-time force arrows from contact points
+            if force_springs_data is not None and x is not None:
                 proj_mat = intrinsic @ w2c[:3, :]
                 for j in range(n_ctrl_parts):
                     # Compute the center of contact on the object surface
@@ -1472,7 +1570,9 @@ class InvPhyTrainerWarp:
                     )
                     force_center_np = force_center.cpu().numpy()
                     force_vector_np = force_vector.cpu().numpy()
-                    if not (force_vector_np == 0).all():
+                    force_mag = np.linalg.norm(force_vector_np)
+                    current_force_magnitudes[j] = force_mag
+                    if show_force_arrows and not (force_vector_np == 0).all():
                         # Arrow endpoint in 3D
                         arrow_end = force_center_np + force_vector_np / force_scale
                         # Project origin and endpoint to 2D
@@ -1492,15 +1592,14 @@ class InvPhyTrainerWarp:
                                 v1 = int(v0 + dy * scale_f)
                             color = force_colors[j]
                             cv2.arrowedLine(frame, (u0, v0), (u1, v1), color, 3, tipLength=0.3)
-                            # Draw force magnitude text
-                            force_mag = np.linalg.norm(force_vector_np)
+                            # Draw force magnitude text next to arrow
                             cv2.putText(
                                 frame, f"F={force_mag:.1f}",
                                 (u1 + 5, v1 - 5),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
                             )
 
-            # Draw force control HUD overlay (always shown so user knows about F key)
+            # Always draw force HUD overlay
             hud_font = cv2.FONT_HERSHEY_SIMPLEX
             hud_y = 30
             if force_control_active:
@@ -1522,13 +1621,24 @@ class InvPhyTrainerWarp:
                     else:
                         f_color = (0, 165, 255)     # orange
                     cv2.putText(frame, f"{hand_name}: F={f_mag:.1f}", (10, hud_y), hud_font, 0.5, f_color, 1)
-            elif show_forces:
-                # Show measured forces in displacement mode when --show_forces is on
+            else:
+                # Always show measured forces in displacement mode
+                mode_color = (200, 200, 200)
+                cv2.putText(frame, "Mode: DISPLACEMENT [F]", (10, hud_y), hud_font, 0.5, mode_color, 1)
+                hud_y += 22
                 for i in range(n_ctrl_parts):
                     hand_name = ["Left", "Right"][i] if n_ctrl_parts > 1 else "Hand"
                     f_mag = current_force_magnitudes[i]
                     cv2.putText(frame, f"{hand_name}: F={f_mag:.1f}", (10, hud_y), hud_font, 0.5, (255, 255, 255), 1)
                     hud_y += 22
+
+            # Force scale reference (bottom-left)
+            scale_y = height - 60
+            cv2.putText(frame, f"F = k*(L/L0 - 1)  [sim units]", (10, scale_y), hud_font, 0.4, (180, 180, 180), 1)
+            scale_y += 18
+            cv2.putText(frame, f"Arrow scale: 1/{force_scale:.0f}", (10, scale_y), hud_font, 0.4, (180, 180, 180), 1)
+            scale_y += 18
+            cv2.putText(frame, f"Max stretch: {cfg.max_stretch_ratio:.1f}x", (10, scale_y), hud_font, 0.4, (180, 180, 180), 1)
 
             # Add shadows when using gaussian rendering
             if image_mask is not None:
@@ -1555,7 +1665,7 @@ class InvPhyTrainerWarp:
                 if key_char in ('f', 'F'):
                     force_control_active = not force_control_active
                     if force_control_active:
-                        show_forces = True  # Auto-enable arrows when entering force mode
+                        show_force_arrows = True  # Auto-enable arrows when entering force mode
                     mode_str = "FORCE CONTROL" if force_control_active else "DISPLACEMENT"
                     print(f"\n>>> Mode switched to: {mode_str} (target={force_target:.1f})")
                 elif key_char in ('+', '='):
@@ -1565,8 +1675,9 @@ class InvPhyTrainerWarp:
                     force_target = max(0.0, force_target - force_target_step)
                     print(f">>> Target force: {force_target:.1f}")
                 elif key_char in ('v', 'V'):
-                    show_forces = not show_forces
-                    print(f">>> Force arrows: {'ON' if show_forces else 'OFF'}")
+                    # Toggle between showing force arrows on the 3D view vs just the HUD
+                    show_force_arrows = not show_force_arrows
+                    print(f">>> Force arrows: {'ON' if show_force_arrows else 'OFF'}")
 
             if virtual_key_input:
                 # Handle virtual keyboard input through OpenCV window
@@ -1686,19 +1797,8 @@ class InvPhyTrainerWarp:
                         target_change[i] = dir_unit * max(adaptive_step, 0.0)
                     else:
                         target_change[0] = dir_unit * max(adaptive_step, 0.0)
-            else:
-                # Update measured forces for HUD even in displacement mode
-                if force_springs_data is not None:
-                    for i in range(n_ctrl_parts):
-                        force_vec = self.get_force_vector(
-                            x,
-                            force_springs_data["springs"][i],
-                            force_springs_data["rest_lengths"][i],
-                            force_springs_data["spring_Y"][i],
-                            self.num_all_points,
-                            current_target,
-                        )
-                        current_force_magnitudes[i] = torch.norm(force_vec).item()
+            # In displacement mode, current_force_magnitudes are already updated
+            # during force arrow rendering above.
 
             if masks_ctrl_pts is not None:
                 for i in range(n_ctrl_parts):
@@ -2152,7 +2252,7 @@ class InvPhyTrainerWarp:
         self, x, springs, rest_lengths, spring_Y, num_object_points, controller_points
     ):
         with torch.no_grad():
-            # Calculate the force of the springs
+            # Calculate the force of the springs (matches eval_springs kernel)
             x1 = controller_points[springs[:, 0]]
             x2 = x[springs[:, 1]]
 
@@ -2160,11 +2260,19 @@ class InvPhyTrainerWarp:
             dis_len = torch.norm(dis, dim=1)
 
             d = dis / torch.clamp(dis_len, min=1e-6)[:, None]
+
+            # Clamp strain ratio to match the simulator's max_stretch_ratio
+            strain_ratio = torch.clamp(
+                dis_len / rest_lengths,
+                min=1.0 / cfg.max_stretch_ratio,
+                max=cfg.max_stretch_ratio,
+            )
+
             spring_forces = (
                 torch.clamp(spring_Y, min=cfg.spring_Y_min, max=cfg.spring_Y_max)[
                     :, None
                 ]
-                * (dis_len / rest_lengths - 1.0)[:, None]
+                * (strain_ratio - 1.0)[:, None]
                 * d
             )
 

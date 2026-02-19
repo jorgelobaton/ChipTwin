@@ -91,6 +91,7 @@ def eval_springs(
     dashpot_damping: float,
     spring_Y_min: float,
     spring_Y_max: float,
+    max_stretch_ratio: float,
     f: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
@@ -120,9 +121,14 @@ def eval_springs(
 
         d = dis / wp.max(dis_len, 1e-6)
 
+        # Clamp strain ratio to max_stretch_ratio to prevent infinite stretching.
+        # The strain ratio L/L0 is clamped to [1/max_stretch_ratio, max_stretch_ratio]
+        # so the force saturates at extreme extensions/compressions.
+        strain_ratio = wp.clamp(dis_len / rest, 1.0 / max_stretch_ratio, max_stretch_ratio)
+
         spring_force = (
             wp.clamp(wp.exp(spring_Y[tid]), low=spring_Y_min, high=spring_Y_max)
-            * (dis_len / rest - 1.0)
+            * (strain_ratio - 1.0)
             * d
         )
 
@@ -601,6 +607,7 @@ class SpringMassSystemWarp:
         enable_plasticity=False,
         break_strain=0.5,
         enable_breakage=False,
+        max_stretch_ratio=3.0,
     ):
         logger.info(f"[SIMULATION]: Initialize the Spring-Mass System")
         self.device = cfg.device
@@ -632,6 +639,7 @@ class SpringMassSystemWarp:
         self.reverse_factor = 1.0 if not reverse_z else -1.0
         self.spring_Y_min = spring_Y_min
         self.spring_Y_max = spring_Y_max
+        self.max_stretch_ratio = max_stretch_ratio
 
         if controller_points is None:
             assert num_object_points == self.n_vertices
@@ -751,6 +759,8 @@ class SpringMassSystemWarp:
             * torch.ones(self.n_springs, dtype=torch.float32, device=self.device),
             requires_grad=True,
         )
+        # Backup of initial spring_Y for resetting after breakage each epoch
+        self.wp_init_spring_Y = wp.clone(self.wp_spring_Y, requires_grad=False)
         self.wp_collide_elas = wp.from_torch(
             torch.tensor([collide_elas], dtype=torch.float32, device=self.device),
             requires_grad=cfg.collision_learn,
@@ -772,14 +782,19 @@ class SpringMassSystemWarp:
             requires_grad=cfg.collision_learn,
         )
 
+        # Per-spring plasticity parameters: each spring has its own yield_strain
+        # and hardening_factor, initialized uniformly from the global scalar values.
         self.wp_yield_strain = wp.from_torch(
-            torch.tensor([yield_strain], dtype=torch.float32, device=self.device),
+            torch.full((self.n_springs,), yield_strain, dtype=torch.float32, device=self.device),
             requires_grad=True,
         )
         self.wp_hardening_factor = wp.from_torch(
-            torch.tensor([hardening_factor], dtype=torch.float32, device=self.device),
+            torch.full((self.n_springs,), hardening_factor, dtype=torch.float32, device=self.device),
             requires_grad=True,
         )
+        # Backups for resetting per-spring plasticity params between epochs
+        self.wp_init_yield_strain = wp.clone(self.wp_yield_strain, requires_grad=False)
+        self.wp_init_hardening_factor = wp.clone(self.wp_hardening_factor, requires_grad=False)
         self.enable_plasticity = enable_plasticity
         
         self.wp_break_strain = wp.from_torch(
@@ -933,6 +948,38 @@ class SpringMassSystemWarp:
             inputs=[self.wp_init_rest_lengths],
             outputs=[self.wp_rest_lengths],
         )
+        # Also reset spring_Y if breakage is enabled (undo broken springs from previous epoch)
+        if self.enable_breakage:
+            self.reset_spring_Y()
+
+    def reset_spring_Y(self):
+        """Reset spring_Y to initial values (undo breakage from previous epoch).
+        
+        Note: This resets to the *initial* spring_Y, not the current learned values.
+        The learned spring_Y is updated via the optimizer which writes gradients
+        into wp_spring_Y. After reset, the optimizer continues from the init values.
+        To preserve learned stiffness across epochs while only undoing breakage,
+        we copy from wp_init_spring_Y which is updated via update_init_spring_Y().
+        """
+        wp.launch(
+            copy_float,
+            dim=self.n_springs,
+            inputs=[self.wp_init_spring_Y],
+            outputs=[self.wp_spring_Y],
+        )
+
+    def update_init_spring_Y(self):
+        """Update the init backup to match current learned spring_Y values.
+        
+        Call this after optimizer updates so that reset_spring_Y() restores
+        to the latest learned values rather than the very first initialization.
+        """
+        wp.launch(
+            copy_float,
+            dim=self.n_springs,
+            inputs=[self.wp_spring_Y],
+            outputs=[self.wp_init_spring_Y],
+        )
 
     def set_acc_count(self, acc_count):
         if acc_count:
@@ -1009,6 +1056,7 @@ class SpringMassSystemWarp:
                     self.dashpot_damping,
                     self.spring_Y_min,
                     self.spring_Y_max,
+                    self.max_stretch_ratio,
                 ],
                 outputs=[self.wp_states[i].wp_vertice_forces],
             )
@@ -1213,6 +1261,13 @@ class SpringMassSystemWarp:
             inputs=[spring_Y],
             outputs=[self.wp_spring_Y],
         )
+        # Also update the backup so reset_spring_Y restores to these learned values
+        wp.launch(
+            copy_float,
+            dim=self.n_springs,
+            inputs=[spring_Y],
+            outputs=[self.wp_init_spring_Y],
+        )
 
     def set_collide(self, collide_elas, collide_fric):
         wp.launch(
@@ -1241,6 +1296,63 @@ class SpringMassSystemWarp:
             inputs=[collide_object_fric],
             outputs=[self.wp_collide_object_fric],
         )
+
+    def set_break_strain(self, break_strain_val):
+        """Set break_strain from a scalar value (e.g. from checkpoint)."""
+        break_strain_t = wp.from_torch(
+            torch.tensor([break_strain_val], dtype=torch.float32, device=self.device),
+            requires_grad=False,
+        )
+        wp.launch(
+            copy_float,
+            dim=1,
+            inputs=[break_strain_t],
+            outputs=[self.wp_break_strain],
+        )
+
+    def set_yield_strain(self, yield_strain):
+        """Set per-spring yield_strain from a tensor (shape [n_springs]) or scalar.
+        Also updates the init backup so reset restores to these values.
+        """
+        if not isinstance(yield_strain, torch.Tensor):
+            yield_strain = torch.full(
+                (self.n_springs,), float(yield_strain),
+                dtype=torch.float32, device=self.device,
+            )
+        elif yield_strain.numel() == 1:
+            yield_strain = yield_strain.expand(self.n_springs).contiguous()
+        src = wp.from_torch(yield_strain.to(self.device), requires_grad=False)
+        wp.launch(copy_float, dim=self.n_springs, inputs=[src], outputs=[self.wp_yield_strain])
+        wp.launch(copy_float, dim=self.n_springs, inputs=[src], outputs=[self.wp_init_yield_strain])
+
+    def set_hardening_factor(self, hardening_factor):
+        """Set per-spring hardening_factor from a tensor (shape [n_springs]) or scalar.
+        Also updates the init backup so reset restores to these values.
+        """
+        if not isinstance(hardening_factor, torch.Tensor):
+            hardening_factor = torch.full(
+                (self.n_springs,), float(hardening_factor),
+                dtype=torch.float32, device=self.device,
+            )
+        elif hardening_factor.numel() == 1:
+            hardening_factor = hardening_factor.expand(self.n_springs).contiguous()
+        src = wp.from_torch(hardening_factor.to(self.device), requires_grad=False)
+        wp.launch(copy_float, dim=self.n_springs, inputs=[src], outputs=[self.wp_hardening_factor])
+        wp.launch(copy_float, dim=self.n_springs, inputs=[src], outputs=[self.wp_init_hardening_factor])
+
+    def reset_plasticity_params(self):
+        """Reset per-spring yield_strain and hardening_factor to their init backups."""
+        wp.launch(copy_float, dim=self.n_springs,
+                  inputs=[self.wp_init_yield_strain], outputs=[self.wp_yield_strain])
+        wp.launch(copy_float, dim=self.n_springs,
+                  inputs=[self.wp_init_hardening_factor], outputs=[self.wp_hardening_factor])
+
+    def update_init_plasticity_params(self):
+        """Snapshot current per-spring yield_strain and hardening_factor as init backups."""
+        wp.launch(copy_float, dim=self.n_springs,
+                  inputs=[self.wp_yield_strain], outputs=[self.wp_init_yield_strain])
+        wp.launch(copy_float, dim=self.n_springs,
+                  inputs=[self.wp_hardening_factor], outputs=[self.wp_init_hardening_factor])
 
     @wp.kernel
     def update_plasticity_kernel(
@@ -1271,8 +1383,8 @@ class SpringMassSystemWarp:
 
         rest = rest_lengths[tid]
 
-        yield_strain = yield_strain_arr[0]
-        hardening_factor = hardening_factor_arr[0]
+        yield_strain = yield_strain_arr[tid]
+        hardening_factor = hardening_factor_arr[tid]
 
         if rest > 1e-6:
             strain = (dis_len / rest) - 1.0
@@ -1316,6 +1428,22 @@ class SpringMassSystemWarp:
         num_object_points: int,
         control_x: wp.array(dtype=wp.vec3),
     ):
+        """Smooth differentiable breakage kernel.
+        
+        When |strain| exceeds break_strain, the spring stiffness (log-space Y)
+        is smoothly driven toward -100 (effectively zero stiffness).
+        
+        Uses softplus activation (same approach as plasticity) so gradients
+        flow through break_strain, making it learnable.
+        
+        F_break acts as a multiplicative penalty:
+            alpha = softplus(|strain| - break_strain, k=50)
+            w = alpha / (alpha + |strain|)  ∈ [0, 1)
+            spring_Y[tid] -= breakage_rate * w * (spring_Y[tid] - Y_broken)
+            
+        where Y_broken = -100 (log-space, i.e. exp(-100) ≈ 0 stiffness).
+        This smoothly ramps down stiffness once strain exceeds the break threshold.
+        """
         tid = wp.tid()
         idx1 = springs[tid][0]
         idx2 = springs[tid][1]
@@ -1334,13 +1462,22 @@ class SpringMassSystemWarp:
         dis_len = wp.length(dis)
 
         rest = rest_lengths[tid]
-        
         break_strain = break_strain_arr[0]
-        
+
         if rest > 1e-6:
             strain = (dis_len / rest) - 1.0
-            
-            # If strain exceeds break limit, disable the spring by setting stiffness (Y) to very low value
-            if wp.abs(strain) > break_strain:
-                # Assuming spring_Y is log-stiffness, set to -100 (exp(-100) ~ 0)
-                spring_Y[tid] = -100.0
+            abs_strain = wp.abs(strain)
+
+            # Smooth activation: how far past break threshold
+            k = 50.0
+            excess_arg = wp.clamp(k * (abs_strain - break_strain), -20.0, 20.0)
+            alpha = wp.log(1.0 + wp.exp(excess_arg)) / k
+
+            # Normalized weight: 0 when below threshold, approaches 1 when far above
+            w = alpha / (alpha + abs_strain + 1e-6)
+
+            # Aggressively drive spring_Y toward -100 (broken)
+            breakage_rate = 10.0
+            Y_broken = -100.0
+            current_Y = spring_Y[tid]
+            spring_Y[tid] = current_Y + breakage_rate * w * (Y_broken - current_Y)
