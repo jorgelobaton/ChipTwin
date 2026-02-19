@@ -44,6 +44,19 @@ def saver_thread(q, stop_event):
         
         q.task_done()
 
+
+def camera_capture_thread(cam, latest_frame, lock, stop_event):
+    """
+    Per-camera thread: continuously calls get_frame() and stores the latest result.
+    This decouples heavy per-frame processing (filters, rotation, crop) from the
+    main loop, so the main loop never blocks waiting for a single camera.
+    """
+    while not stop_event.is_set():
+        result = cam.get_frame()
+        if result[1] is not None:
+            with lock:
+                latest_frame[0] = result
+
 def discover_cameras():
     print("--- Discovery Mode ---")
     ctx = rs.context()
@@ -123,6 +136,23 @@ def main(args):
         print("[FAIL] No cameras found.")
         return
 
+    # 1b. Start per-camera capture threads
+    # Each thread runs get_frame() continuously so the main loop never blocks.
+    cam_latest = {}   # cid -> [latest (depth, color)] (list so we can mutate in-place)
+    cam_locks  = {}   # cid -> threading.Lock
+    stop_capture = threading.Event()
+    capture_threads = []
+    for cid, cam in cameras.items():
+        latest = [None]
+        lock = threading.Lock()
+        cam_latest[cid] = latest
+        cam_locks[cid]  = lock
+        t = threading.Thread(target=camera_capture_thread,
+                             args=(cam, latest, lock, stop_capture),
+                             daemon=True)
+        t.start()
+        capture_threads.append(t)
+
     # 2. Setup Recording Paths
     camera_ids = sorted(cameras.keys())
     for cam_id in camera_ids:
@@ -134,14 +164,21 @@ def main(args):
     fourcc = cv2.VideoWriter_fourcc(*'avc1')
     
     print("Initializing streams...")
-    while True:
-        d, c = cameras[camera_ids[0]].get_frame()
-        if c is not None: break
-        time.sleep(0.1)
+    # Wait until all cameras have at least one frame in their buffer
+    for cid in camera_ids:
+        while True:
+            with cam_locks[cid]:
+                frame = cam_latest[cid][0]
+            if frame is not None and frame[1] is not None:
+                break
+            time.sleep(0.05)
 
     for cam_id in camera_ids:
-        d, c = cameras[cam_id].get_frame() 
-        if c is None: continue 
+        with cam_locks[cam_id]:
+            frame = cam_latest[cam_id][0]
+        if frame is None or frame[1] is None:
+            continue
+        c = frame[1]
         h, w = c.shape[:2]
         v_path = f"{output_dir}/color/{cam_id}.mp4"
         video_writers[cam_id] = cv2.VideoWriter(v_path, fourcc, 30.0, (w, h))
@@ -178,6 +215,13 @@ def main(args):
     timed_state = 0 # 0: Idle, 1: Countdown, 2: Recording
     timer_start_ts = 0.0
 
+    # FPS tracking
+    fps_window = 60  # rolling window size (frames)
+    frame_timestamps = []   # timestamps of captured main-loop iterations
+    record_timestamps = []  # timestamps of recorded frames (for recording FPS)
+    display_fps = 0.0
+    record_fps  = 0.0
+
     try:
         while True:
             # Timer Logic
@@ -196,17 +240,36 @@ def main(args):
                         timed_state = 0
                         print(">> TIMER: STOP RECORDING")
 
-            # A. Synchronized Capture
+            # A. Synchronized Capture — read latest frame from each camera thread
             frames = {}
-            for cid, cam in cameras.items():
-                d, c = cam.get_frame()
-                if c is not None: frames[cid] = (d, c)
+            for cid in camera_ids:
+                with cam_locks[cid]:
+                    frame = cam_latest[cid][0]
+                if frame is not None and frame[1] is not None:
+                    frames[cid] = frame
             
             if len(frames) != len(cameras):
                 continue
 
+            # Track main-loop FPS (rolling window)
+            now = time.monotonic()
+            frame_timestamps.append(now)
+            if len(frame_timestamps) > fps_window:
+                frame_timestamps.pop(0)
+            if len(frame_timestamps) >= 2:
+                elapsed = frame_timestamps[-1] - frame_timestamps[0]
+                display_fps = (len(frame_timestamps) - 1) / elapsed if elapsed > 0 else 0.0
+
             # B. Processing / Recording
             if is_recording:
+                rec_now = time.monotonic()
+                record_timestamps.append(rec_now)
+                if len(record_timestamps) > fps_window:
+                    record_timestamps.pop(0)
+                if len(record_timestamps) >= 2:
+                    elapsed = record_timestamps[-1] - record_timestamps[0]
+                    record_fps = (len(record_timestamps) - 1) / elapsed if elapsed > 0 else 0.0
+
                 for cid in camera_ids:
                     d, c = frames[cid]
                     depth_path = f"{output_dir}/depth/{cid}/{global_frame_count}.npy"
@@ -214,39 +277,44 @@ def main(args):
                     save_queue.put(item)
                 
                 if global_frame_count % 30 == 0:
-                    print(f"Recorded {global_frame_count} frames... (Q: {save_queue.qsize()})")
+                    print(f"Recorded {global_frame_count} frames... (Q: {save_queue.qsize()}) | FPS: {record_fps:.1f}")
                 global_frame_count += 1
 
             # C. Visualization (With Overlay)
-            if not is_recording:
-                display_imgs = []
-                for cid in camera_ids:
-                    d, c = frames[cid]
-                    
+            display_imgs = []
+            for cid in camera_ids:
+                d, c = frames[cid]
+                
+                if not is_recording:
                     # Depth Overlay
                     vis_scale = cameras[cid].config_data.get('visual_scale', 5)
                     d_cm = cv2.applyColorMap(cv2.convertScaleAbs(d, alpha=vis_scale/100.0), cv2.COLORMAP_JET)
                     d_cm[d==0] = 0
                     ov = cv2.addWeighted(c, 0.6, d_cm, 0.4, 0)
+                else:
+                    ov = c.copy()
 
-                    cv2.putText(ov, cid, (20,40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
-                    display_imgs.append(cv2.resize(ov, (400, 400)))
+                cv2.putText(ov, cid, (20,40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+                display_imgs.append(cv2.resize(ov, (400, 400)))
+            
+            if display_imgs:
+                stack = np.hstack(display_imgs)
+                status_bar = np.zeros((60, stack.shape[1], 3), dtype=np.uint8)
                 
-                if display_imgs:
-                    stack = np.hstack(display_imgs)
-                    status_bar = np.zeros((60, stack.shape[1], 3), dtype=np.uint8)
-                    
-                    if is_timed_mode and timed_state == 1:
-                        rem = max(0.0, 3.0 - (time.time() - timer_start_ts))
-                        txt = f"Starting in {rem:.1f}s..."
-                        col = (0, 165, 255) # Orange
-                    else:
-                        txt = "Standby (Space: Man, T: Timer)"
-                        col = (0, 255, 0)
+                if is_recording:
+                    txt = f"REC  frame:{global_frame_count}  FPS:{record_fps:.1f}"
+                    col = (0, 0, 255) # Red while recording
+                elif is_timed_mode and timed_state == 1:
+                    rem = max(0.0, 3.0 - (time.time() - timer_start_ts))
+                    txt = f"Starting in {rem:.1f}s...  preview FPS:{display_fps:.1f}"
+                    col = (0, 165, 255) # Orange
+                else:
+                    txt = f"Standby (Space: Man, T: Timer)  FPS:{display_fps:.1f}"
+                    col = (0, 255, 0)
 
-                    cv2.putText(status_bar, txt, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
-                    final_vis = np.vstack((stack, status_bar))
-                    cv2.imshow("Recorder", final_vis)
+                cv2.putText(status_bar, txt, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
+                final_vis = np.vstack((stack, status_bar))
+                cv2.imshow("Recorder", final_vis)
 
             # D. Input
             k = cv2.waitKey(1)
@@ -265,6 +333,11 @@ def main(args):
                     print(f">> TIMER STARTED (3s Countdown)")
 
     finally:
+        print("Stopping capture threads...")
+        stop_capture.set()
+        for t in capture_threads:
+            t.join(timeout=2.0)
+
         print("Stopping cameras...")
         for cam in cameras.values(): cam.stop()
         
@@ -275,8 +348,21 @@ def main(args):
         for vw in video_writers.values(): vw.release()
         cv2.destroyAllWindows()
 
+        # Print final FPS summary
+        if record_timestamps and len(record_timestamps) >= 2:
+            total_elapsed = record_timestamps[-1] - record_timestamps[0]
+            final_fps = (len(record_timestamps) - 1) / total_elapsed if total_elapsed > 0 else 0.0
+            print(f"\n[FPS] Recorded {global_frame_count} frames  |  avg record FPS: {final_fps:.2f}")
+        elif global_frame_count > 0:
+            print(f"\n[FPS] Recorded {global_frame_count} frames (not enough data for FPS calc)")
+
         # Update Metadata
+        real_fps = 0.0
+        if record_timestamps and len(record_timestamps) >= 2:
+            total_elapsed = record_timestamps[-1] - record_timestamps[0]
+            real_fps = (len(record_timestamps) - 1) / total_elapsed if total_elapsed > 0 else 0.0
         metadata["frame_num"] = global_frame_count
+        metadata["real_fps"] = round(real_fps, 2)
         with open(f"{output_dir}/metadata.json", "w") as f:
             json.dump(metadata, f, indent=4)
 
