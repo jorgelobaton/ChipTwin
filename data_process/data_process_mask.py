@@ -179,6 +179,11 @@ if __name__ == "__main__":
                     mask_info[cam_id]["controller"].append(int(key))
                 else:
                     mask_info[cam_id]["controller"] = [int(key)]
+        # Ensure every camera has a controller entry (may be empty if detection missed it)
+        if "controller" not in mask_info[cam_id]:
+            print(f"Warning: No controller ('{CONTROLLER_NAME}') detected in camera {cam_id}. "
+                  f"Detected labels: {list(data.values())}. Controller mask will be empty.")
+            mask_info[cam_id]["controller"] = []
 
     vis = o3d.visualization.Visualizer()
     vis.create_window()

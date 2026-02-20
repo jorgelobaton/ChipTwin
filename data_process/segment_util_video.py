@@ -24,6 +24,10 @@ parser.add_argument("--case_name", type=str)
 parser.add_argument("--TEXT_PROMPT", type=str)
 parser.add_argument("--camera_id", type=str)
 parser.add_argument("--output_path", type=str, default="NONE")
+parser.add_argument("--box_threshold", type=float, default=0.35,
+                    help="GroundingDINO box confidence threshold (lower = more permissive)")
+parser.add_argument("--text_threshold", type=float, default=0.25,
+                    help="GroundingDINO text confidence threshold")
 args = parser.parse_args()
 
 base_path = args.base_path
@@ -50,8 +54,8 @@ def existDir(dir_path):
 
 GROUNDING_DINO_CONFIG = "./data_process/groundedSAM_checkpoints/GroundingDINO_SwinT_OGC.py"
 GROUNDING_DINO_CHECKPOINT = "./data_process/groundedSAM_checkpoints/groundingdino_swint_ogc.pth"
-BOX_THRESHOLD = 0.35
-TEXT_THRESHOLD = 0.25
+BOX_THRESHOLD = args.box_threshold
+TEXT_THRESHOLD = args.text_threshold
 PROMPT_TYPE_FOR_VIDEO = "box"  # choose from ["point", "box", "mask"]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

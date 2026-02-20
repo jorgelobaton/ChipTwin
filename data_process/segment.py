@@ -11,6 +11,8 @@ parser.add_argument(
 )
 parser.add_argument("--case_name", type=str, required=True)
 parser.add_argument("--TEXT_PROMPT", type=str, required=True)
+parser.add_argument("--box_threshold", type=float, default=0.35)
+parser.add_argument("--text_threshold", type=float, default=0.25)
 args = parser.parse_args()
 
 base_path = args.base_path
@@ -23,6 +25,6 @@ print(f"Processing {case_name}")
 for cam_id in camera_ids:
     print(f"Processing {case_name} camera {cam_id}")
     os.system(
-        f"python ./data_process/segment_util_video.py --base_path {base_path} --case_name {case_name} --TEXT_PROMPT '{TEXT_PROMPT}' --camera_id {cam_id}"
+        f"python ./data_process/segment_util_video.py --base_path {base_path} --case_name {case_name} --TEXT_PROMPT '{TEXT_PROMPT}' --camera_id {cam_id} --box_threshold {args.box_threshold} --text_threshold {args.text_threshold}"
     )
     os.system(f"rm -rf {base_path}/{case_name}/tmp_data")
