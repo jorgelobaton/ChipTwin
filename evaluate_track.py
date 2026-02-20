@@ -1,3 +1,4 @@
+import argparse
 import pickle
 import csv
 import json
@@ -13,6 +14,11 @@ output_file = "results/final_track.csv"
 if not os.path.exists("results"):
     os.makedirs("results")
 
+parser = argparse.ArgumentParser(description="Evaluate tracking error")
+parser.add_argument("--normal", action="store_true", help="Evaluate normal variant")
+parser.add_argument("--plasticity", action="store_true", help="Evaluate plasticity variant")
+parser.add_argument("--breakage", action="store_true", help="Evaluate breakage variant")
+parser.add_argument("--case_name", type=str, default="", help="Evaluate only a specific case (by name) instead of all cases in data_config.csv")
 
 def evaluate_prediction(start_frame, end_frame, vertices, gt_track_3d, idx, mask):
     track_errors = []
@@ -34,16 +40,23 @@ def evaluate_case(case_name, exp_dir):
     """Evaluate a single experiment directory. Returns (train_error, test_error) or None if missing files."""
     inference_path = f"{exp_dir}/inference.pkl"
     gt_track_path = f"{base_path}/{case_name}/gt_track_3d.pkl"
+    track_process_path = f"{base_path}/{case_name}/track_process_data.pkl"
     split_path = f"{base_path}/{case_name}/split.json"
 
     if not os.path.exists(inference_path):
         print(f"  Skipping {exp_dir}: inference.pkl not found")
         return None
-    if not os.path.exists(gt_track_path):
-        print(f"  Skipping {exp_dir}: gt_track_3d.pkl not found")
-        return None
     if not os.path.exists(split_path):
         print(f"  Skipping {exp_dir}: split.json not found")
+        return None
+
+    # Determine which GT tracking source to use
+    if os.path.exists(gt_track_path):
+        gt_source = "gt_track_3d"
+    elif os.path.exists(track_process_path):
+        gt_source = "track_process_data"
+    else:
+        print(f"  Skipping {exp_dir}: no tracking GT found (tried gt_track_3d.pkl, track_process_data.pkl)")
         return None
 
     with open(split_path, "r") as f:
@@ -54,8 +67,19 @@ def evaluate_case(case_name, exp_dir):
     with open(inference_path, "rb") as f:
         vertices = pickle.load(f)
 
-    with open(gt_track_path, "rb") as f:
-        gt_track_3d = pickle.load(f)
+    if gt_source == "gt_track_3d":
+        with open(gt_track_path, "rb") as f:
+            gt_track_3d = pickle.load(f)
+    else:
+        # Build gt_track_3d from track_process_data.pkl
+        # object_points: (frames, N, 3), object_visibilities: (frames, N)
+        with open(track_process_path, "rb") as f:
+            track_data = pickle.load(f)
+        object_points = track_data["object_points"]       # (F, N, 3)
+        object_vis = track_data["object_visibilities"]     # (F, N) bool
+        # Set invisible points to NaN to match gt_track_3d format
+        gt_track_3d = object_points.copy().astype(np.float64)
+        gt_track_3d[~object_vis] = np.nan
 
     # Locate the index of corresponding point index in the vertices
     mask = ~np.isnan(gt_track_3d[0]).any(axis=1)
@@ -69,13 +93,22 @@ def evaluate_case(case_name, exp_dir):
 
 
 if __name__ == "__main__":
-    # Read case names from data_config.csv
-    case_names = []
-    with open("data_config.csv", newline="", encoding="utf-8") as csvfile:
-        reader = csv.reader(csvfile)
-        for row in reader:
-            if row:
-                case_names.append(row[0].strip())
+    args = parser.parse_args()
+
+    if not (args.normal or args.plasticity or args.breakage):
+        args.normal = True
+        args.plasticity = True
+
+    # Read case names
+    if args.case_name:
+        case_names = [args.case_name]
+    else:
+        case_names = []
+        with open("data_config.csv", newline="", encoding="utf-8") as csvfile:
+            reader = csv.reader(csvfile)
+            for row in reader:
+                if row:
+                    case_names.append(row[0].strip())
 
     # Collect results for CSV and plotting
     results = []  # list of (case_name, variant_label, train_err, test_err)
@@ -91,23 +124,22 @@ if __name__ == "__main__":
 
         print(f"Processing {case_name}")
 
-        # Evaluate normal variant
-        normal_dir = f"{prediction_path}/{case_name}"
-        result_normal = evaluate_case(case_name, normal_dir)
-        if result_normal is not None:
-            train_err, test_err = result_normal
-            writer.writerow([case_name, "normal", train_err, test_err])
-            results.append((case_name, "normal", train_err, test_err))
-            print(f"  normal  -> train: {train_err:.6f}, test: {test_err:.6f}")
+        variants_to_run = []
+        if args.normal:
+            variants_to_run.append(("normal", ""))
+        if args.plasticity:
+            variants_to_run.append(("plasticity", "_ep"))
+        if args.breakage:
+            variants_to_run.append(("breakage", "_breakage"))
 
-        # Evaluate _ep (elastoplastic) variant
-        ep_dir = f"{prediction_path}/{case_name}_ep"
-        result_ep = evaluate_case(case_name, ep_dir)
-        if result_ep is not None:
-            train_err, test_err = result_ep
-            writer.writerow([case_name, "plasticity", train_err, test_err])
-            results.append((case_name, "plasticity", train_err, test_err))
-            print(f"  plastic -> train: {train_err:.6f}, test: {test_err:.6f}")
+        for variant_name, suffix in variants_to_run:
+            exp_dir = f"{prediction_path}/{case_name}{suffix}"
+            result = evaluate_case(case_name, exp_dir)
+            if result is not None:
+                train_err, test_err = result
+                writer.writerow([case_name, variant_name, train_err, test_err])
+                results.append((case_name, variant_name, train_err, test_err))
+                print(f"  {variant_name:<10} -> train: {train_err:.6f}, test: {test_err:.6f}")
 
     file.close()
     print(f"\nResults saved to {output_file}")
@@ -125,69 +157,63 @@ if __name__ == "__main__":
             case_order.append(case_name)
             seen.add(case_name)
 
-    # Prepare data for grouped bar chart
-    normal_train = {}
-    normal_test = {}
-    ep_train = {}
-    ep_test = {}
+    variants = []
+    if args.normal: variants.append("normal")
+    if args.plasticity: variants.append("plasticity")
+    if args.breakage: variants.append("breakage")
+
+    # Prepare data
+    data = {"Train": {v: {} for v in variants}, "Test": {v: {} for v in variants}}
     for case_name, variant, train_err, test_err in results:
-        if variant == "normal":
-            normal_train[case_name] = train_err
-            normal_test[case_name] = test_err
-        else:
-            ep_train[case_name] = train_err
-            ep_test[case_name] = test_err
+        data["Train"][variant][case_name] = train_err * 1000  # convert to mm for better visualization
+        data["Test"][variant][case_name] = test_err * 1000  # convert to mm for better visualization
 
     x = np.arange(len(case_order))
-    width = 0.2
+    
+    num_bars_per_case = len(variants) * 2
+    total_width = 0.8
+    bar_width = total_width / num_bars_per_case
+    
+    fig, ax = plt.subplots(figsize=(max(10, len(case_order) * num_bars_per_case * 0.6), 6))
+    
+    colors = {
+        "normal": "#4C72B0",
+        "plasticity": "#DD8452",
+        "breakage": "#55A868"
+    }
+    
+    for i, phase in enumerate(["Train", "Test"]):
+        phase_offset = -total_width/4 if phase == "Train" else total_width/4
+        
+        for j, variant in enumerate(variants):
+            variant_offset = (j - (len(variants) - 1) / 2) * bar_width
+            pos = x + phase_offset + variant_offset
+            
+            vals = [data[phase][variant].get(c, 0) for c in case_order]
+            has_val = [c in data[phase][variant] for c in case_order]
+            
+            label = f"{variant.capitalize()} ({phase})"
+            hatch = "///" if phase == "Test" else ""
+            alpha = 0.9 if phase == "Train" else 0.7
+            
+            bars = ax.bar(pos, vals, bar_width, label=label, color=colors[variant], alpha=alpha, hatch=hatch, edgecolor="white")
+            
+            for k, (v, h) in enumerate(zip(vals, has_val)):
+                if h:
+                    ax.text(pos[k], v + max(max(vals), 1e-5)*0.02, f"{v:.3f}", ha="center", va="bottom", fontsize=8, rotation=0)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(8, len(case_order) * 3), 6))
-
-    # Train errors
-    if normal_train:
-        vals = [normal_train.get(c, 0) for c in case_order]
-        has = [c in normal_train for c in case_order]
-        ax1.bar(x - width / 2, vals, width, label="Normal", color="#4C72B0", alpha=0.85)
-        for i, (v, h) in enumerate(zip(vals, has)):
-            if h:
-                ax1.text(i - width / 2, v + v * 0.02, f"{v:.4f}", ha="center", va="bottom", fontsize=7)
-    if ep_train:
-        vals = [ep_train.get(c, 0) for c in case_order]
-        has = [c in ep_train for c in case_order]
-        ax1.bar(x + width / 2, vals, width, label="Plasticity", color="#DD8452", alpha=0.85)
-        for i, (v, h) in enumerate(zip(vals, has)):
-            if h:
-                ax1.text(i + width / 2, v + v * 0.02, f"{v:.4f}", ha="center", va="bottom", fontsize=7)
-
-    ax1.set_xlabel("Case")
-    ax1.set_ylabel("Track Error")
-    ax1.set_title("Train Track Error")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(case_order, rotation=45, ha="right")
-    ax1.legend()
-
-    # Test errors
-    if normal_test:
-        vals = [normal_test.get(c, 0) for c in case_order]
-        ax2.bar(x - width / 2, vals, width, label="Normal", color="#4C72B0", alpha=0.85)
-        for i, (v, h) in enumerate(zip(vals, [c in normal_test for c in case_order])):
-            if h:
-                ax2.text(i - width / 2, v + v * 0.02, f"{v:.4f}", ha="center", va="bottom", fontsize=7)
-    if ep_test:
-        vals = [ep_test.get(c, 0) for c in case_order]
-        ax2.bar(x + width / 2, vals, width, label="Plasticity", color="#DD8452", alpha=0.85)
-        for i, (v, h) in enumerate(zip(vals, [c in ep_test for c in case_order])):
-            if h:
-                ax2.text(i + width / 2, v + v * 0.02, f"{v:.4f}", ha="center", va="bottom", fontsize=7)
-
-    ax2.set_xlabel("Case")
-    ax2.set_ylabel("Track Error")
-    ax2.set_title("Test Track Error")
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(case_order, rotation=45, ha="right")
-    ax2.legend()
-
-    plt.suptitle("Track Error: Normal vs Plasticity", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Case", fontweight="bold")
+    ax.set_ylabel("Track Error (mm)", fontweight="bold")
+    ax.set_title("Tracking Error", fontsize=14, fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(case_order, rotation=0, ha="center")
+    
+    for i in range(len(case_order) - 1):
+        ax.axvline(x[i] + 0.5, color='gray', linestyle='--', alpha=0.3)
+        
+    ax.legend(bbox_to_anchor=(0, 1), loc='upper left')
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    
     plt.tight_layout()
     plt.savefig("results/track_error_comparison.png", dpi=150, bbox_inches="tight")
     print("Plot saved to results/track_error_comparison.png")
