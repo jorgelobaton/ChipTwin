@@ -69,27 +69,49 @@ if __name__ == "__main__":
             [np.zeros((query_pixels.shape[0], 1)), query_pixels], axis=1
         )
         query_pixels = torch.tensor(query_pixels, dtype=torch.float32).to(device)
-        # Randomly select 2000 query points (Reduced from 5000 to avoid OOM)
-        query_pixels = query_pixels[torch.randperm(query_pixels.shape[0])[:3500]]
 
-        # cotracker = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline").to(device)
-        # pred_tracks, pred_visibility = cotracker(video, queries=query_pixels[None], backward_tracking=True)
-        # pred_tracks, pred_visibility = cotracker(video, grid_query_frame=0)
+        # Retry loop: start with 3000 query points, reduce by 500 on each OOM
+        num_query_points = min(3500, query_pixels.shape[0])
+        perm = torch.randperm(query_pixels.shape[0])
 
-        # # Run Online CoTracker:
-        cotracker = torch.hub.load(
-            "facebookresearch/co-tracker", "cotracker3_online"
-        ).to(device)
-        
-        with torch.no_grad():
-            cotracker(video_chunk=video, is_first_step=True, queries=query_pixels[None])
+        while num_query_points > 0:
+            selected_queries = query_pixels[perm[:num_query_points]]
+            print(f"  Trying with {num_query_points} query points...")
 
-            # Process the video
-            for ind in range(0, video.shape[1] - cotracker.step, cotracker.step):
-                pred_tracks, pred_visibility = cotracker(
-                    video_chunk=video[:, ind : ind + cotracker.step * 2]
-                )  # B T N 2,  B T N 1
-        
+            try:
+                torch.cuda.empty_cache()
+                cotracker = torch.hub.load(
+                    "facebookresearch/co-tracker", "cotracker3_online"
+                ).to(device)
+
+                with torch.no_grad():
+                    cotracker(video_chunk=video, is_first_step=True, queries=selected_queries[None])
+
+                    for ind in range(0, video.shape[1] - cotracker.step, cotracker.step):
+                        pred_tracks, pred_visibility = cotracker(
+                            video_chunk=video[:, ind : ind + cotracker.step * 2]
+                        )  # B T N 2,  B T N 1
+
+                print(f"  Success with {num_query_points} query points.")
+                break  # Success — exit retry loop
+
+            except torch.cuda.OutOfMemoryError:
+                print(f"  CUDA OOM with {num_query_points} points, reducing by 500...")
+                num_query_points -= 500
+                # Clean up to free GPU memory
+                del cotracker
+                if 'pred_tracks' in dir():
+                    del pred_tracks
+                if 'pred_visibility' in dir():
+                    del pred_visibility
+                torch.cuda.empty_cache()
+                continue
+        else:
+            raise RuntimeError(
+                f"Camera {cam_id}: CUDA OOM even with {num_query_points + 500} points. "
+                "Try reducing video resolution or using a GPU with more memory."
+            )
+
         vis = Visualizer(
             save_dir=f"{base_path}/{case_name}/cotracker", pad_value=0, linewidth=3
         )
