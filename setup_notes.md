@@ -39,9 +39,16 @@ python run_record.py --output_dir <demo_folder>
 
 ### 3. **Data Processing Pipeline**
 ```bash
+# Standard automatic segmentation (GroundingDINO + SAM2)
 python process_data.py --base_path ./data/different_types --case_name <demo_folder> --category "<your_category>"
+
+# With manual segmentation for difficult objects or controllers (e.g. robot grippers)
+python process_data.py --case_name demo_63 --manual_controller_mask --manual_object_mask
+
+# Selective manual segmentation
+python process_data.py --case_name demo_63 --manual_controller_mask --category "cloth" 
 ```
-*This runs segmentation, tracking, 3D lifting, shape prior, and sampling.*
+*This runs segmentation (manual or auto), tracking, 3D lifting, shape prior, and sampling. See the Appendix for the manual annotation workflow.*
 
 ---
 
@@ -56,8 +63,8 @@ python export_gaussian_data.py --base_path ./data/different_types --case_name <d
 ### 5. **Train Gaussian Splatting Model**
 ```bash
 python gs_train.py \
-    -s ./data/gaussian_data/<demo_folder> \
-    -m ./gaussian_output/<demo_folder>/init=hybrid_iso=True_ldepth=0.001_lnormal=0.0_laniso_0.0_lseg=1.0 \
+    -s ./data/gaussian_data/demo_70 \
+    -m ./gaussian_output/demo_70/init=hybrid_iso=True_ldepth=0.001_lnormal=0.0_laniso_0.0_lseg=1.0 \
     --iterations 10000 \
     --lambda_depth 0.001 --lambda_normal 0.0 --lambda_anisotropic 0.0 --lambda_seg 1.0 \
     --use_masks --isotropic --gs_init_opt 'hybrid'
@@ -125,6 +132,42 @@ python visualize_render_results.py --case_name <demo_folder>
 python visualize_material.py --case_name <demo_folder>
 python visualize_force.py --case_name <demo_folder>
 ```
+
+---
+
+## Appendix: Manual Segmentation Tool
+
+When GroundingDINO fails to segment specific objects (like robot grippers or complex textures), you can use the interactive manual segmentation tool.
+
+### Features
+*   **Segment Anything 2 (SAM2)**: Uses SAM2 for high-quality single-frame segmentation and video propagation.
+*   **Propagation & Review**: Propagate your initial segmentation to all frames and scrub through the video to check for errors.
+*   **Correction Mode**: Pause the review at any frame, add more points or boxes to fix the mask, and re-propagate with the new information.
+
+### Workflow
+When running `process_data.py` with `--manual_controller_mask` or `--manual_object_mask`, the script will open an interactive window for each camera and object:
+
+1.  **Annotation Phase**:
+    *   **Left Click**: Add a positive point.
+    *   **Right Click**: Add a negative point.
+    *   **Click & Drag**: Draw a bounding box.
+    *   **Keys**:
+        *   `z`: Undo last annotation.
+        *   `Enter`: Save current frame's mask and start propagation.
+        *   `q`: Quit/Skip.
+
+2.  **Review Phase**:
+    *   **Space**: Play/Pause propagation review.
+    *   **Left/Right Arrow**: Navigate frame by frame.
+    *   **Keys**:
+        *   `c`: Enter **Correction Mode** at the current frame.
+        *   `s`: Save current video masks (if propagation is satisfactory).
+        *   `r`: Restart from annotation phase.
+
+3.  **Correction Phase**:
+    *   Add new points/boxes to refine the mask on a failing frame.
+    *   `Enter`: Re-propagate taking the current correction (and all previous keyframes) into account.
+    *   `z`: Undo current frame's edits.
 
 ---
 

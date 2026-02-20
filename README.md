@@ -33,7 +33,7 @@ This repository contains the official implementation of the **PhysTwin** framewo
 ### Update
 **This repository will be actively maintained by the authors, with continuous updates introducing new features to inspire further research.**
 
-- **Actively Developing:** In the long term, we aim to develop a comprehensive physics simulator focused on real-to-sim, serving as an easy-to-use platform for XR, VR, and robotics applications. **Feel free to reach out via email if you’re also interested in this direction and would like to collaborate on related research projects.**
+- **[26.2.20] Manual Segmentation with Visual Feedback & Correction:** Added an interactive tool for manual object and controller segmentation. Includes real-time visual feedback, frame-by-frame correction, and automatic propagation using SAM2. This is especially useful for custom robot grippers or complex objects where GroundingDINO may fail. (See below for detailed instructions)
 
 - **[26.1.21] Add Web Visualization for Headless Server Runs:** Thanks to @CAN-Lee, The interactive playground is now supported through Gradio, enabling web-based interaction even when running on a server without a display. (See below for detailed instructions)
 
@@ -248,88 +248,43 @@ python script_process_data.py
 
 # Further get the data for first-frame Gaussian
 python export_gaussian_data.py
-
-# Get human mask data for visualization and rendering evaluation
-python export_video_human_mask.py
 ```
 
-### Control Force Visualization
-Visualize the force applied by the hand to the object as inferred from our PhysTwin model, based solely on video data.
-```
-python visualize_force.py \
---n_ctrl_parts [1 or 2] \
---case_name [case_name]
+### Manual Segmentation with Visual Feedback & Correction
+When automatic segmentation (GroundingDINO) fails to reliably detect the target object or the controller (e.g., a specific robot gripper), you can use the interactive manual segmentation tool. This tool allows for per-frame corrections and automatic mask propagation throughout the entire video sequence using SAM2.
 
-# Examples of usage:
-python visualize_force.py --case_name single_push_rope_1 --n_ctrl_parts 1 
-python visualize_force.py --case_name single_clift_cloth_1 --n_ctrl_parts 1    
-python visualize_force.py --case_name double_stretch_sloth 
-```
-The visualziation video is saved under `experiments` folder.
+#### Key Features:
+-   **Interactive Annotation**: Add positive/negative points and bounding boxes to define the initial mask.
+-   **Live Feedback**: See the predicted mask in real-time as you annotate.
+-   **Sequence Propagation**: SAM2 automatically tracks the defined mask across the entire video.
+-   **Visual Review & Correction**: Scrub through the propagation results; if the mask drifts, pause at a bad frame, correct it, and re-propagate with the new conditioning.
+-   **Undo/Reset**: Easily undo annotations or reset a frame's mask.
 
-### Material Visualization
-Experimental feature to visualize the approximated material from the constructed PhysTwin.
-```
-python visualize_material.py \
---case_name [case_name]
+#### Usage:
+To enable manual segmentation in the main pipeline, use one or both of these flags:
 
-# Examples of usage:
-python visualize_material.py --case_name double_lift_cloth_1
-python visualize_material.py --case_name single_push_rope
-python visualize_material.py --case_name double_stretch_sloth
+```bash
+# Manual segment the controller only (object stays auto)
+python process_data.py --case_name YourCase --category cloth --controller hand --manual_controller_mask
+
+# Manual segment the object only (controller stays auto)
+python process_data.py --case_name YourCase --category cloth --controller hand --manual_object_mask
+
+# Manual segment both for maximal control
+python process_data.py --case_name YourCase --category cloth --controller hand --manual_controller_mask --manual_object_mask
 ```
 
-
-### Multiple Objects Demos
-Try the experimental features for handling collisions among the multiple PhysTwins we construct.
-
-```
-# The stuff is deployed in the 'claw_matchine' branch
-git pull
-git checkout claw_machine
-
-# Play with the examples
-python interactive_playground.py --n_ctrl_parts 1 --case_name single_push_rope_1 --n_dup 4
-python interactive_playground.py --n_ctrl_parts 2 --case_name double_stretch_sloth --n_dup 2
-```
-
-### Web-based Visualization for headless-server
-This feature is contributed by @CAN-Lee—many thanks to the community for the effort (Pull Request #43).
-
-![Gradio_support](./assets/gradio_support.png)
-
-Try the experimental features for setting up an interactive playground on a server and accessing it through a web browser.
-
-```
-# The stuff is deployed in the `gradio_playground` branch
-git pull
-git checkout gradio_playground
-
-python interactive_playground_gradio.py \
-     --case_name double_lift_cloth_3 \
-     --n_ctrl_parts 2  \
-     --inv_ctrl \
-     --server_port 7860 \
-     --share
-```
-
-### Follow-up and Potential Collaborations  
-If you are interested in collaborating or extending this work for your research, feel free to contact us at `hanxiao.jiang@columbia.edu`.  
-
-## Projects Developed or Benchmarked with PhysTwin
-* **[NovaFlow: Zero-Shot Manipulation via Actionable Flow from Generated Videos](https://novaflow.lhy.xyz/)**
-* **[Real-to-Sim Robot Policy Evaluation with Gaussian Splatting Simulation of Soft-Body Interactions](https://real2sim-eval.github.io/)**
-* **[PhysWorld: From Real Videos to World Models of Deformable Objects via Physics-Aware Demonstration Synthesis](https://arxiv.org/abs/2510.21447)**
-* **[NeuSpring: Neural Spring Fields for Reconstruction and Simulation of Deformable Objects from Videos](https://arxiv.org/abs/2511.08310)**
-* ...
-
-### Citation
-If you find this repo useful for your research, please consider citing the paper
-```
-@article{jiang2025phystwin,
-    title={PhysTwin: Physics-Informed Reconstruction and Simulation of Deformable Objects from Videos},
-    author={Jiang, Hanxiao and Hsu, Hao-Yu and Zhang, Kaifeng and Yu, Hsin-Ni and Wang, Shenlong and Li, Yunzhu},
-    journal={ICCV},
-    year={2025}
-}
-```
+#### Manual Tool Controls (OpenCV Window):
+-   **Annotate Phase**:
+    -   `p` - Point mode (Left-click=positive, Right-click=negative)
+    -   `b` - Box mode (Click-drag)
+    -   `z` - Undo last action
+    -   `r` - Reset frame annotations
+    -   `Enter` - Confirm and start propagation
+-   **Review & Correction Phase**:
+    -   `Left` / `Right` arrows - Navigate frames
+    -   `Space` - Play/Pause animation
+    -   `c` - Correct current frame (opens annotator)
+    -   `s` - Save all masks and finish
+    -   `q` / `Esc` - Quit without saving
+````
