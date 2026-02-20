@@ -1,11 +1,15 @@
+# ChipTwin Setup & Command Reference
+
+## Environment Setup Notes
+
 git clone https://github.com/IDEA-Research/GroundingDINO.git
 cd GroundingDINO
-# Then run the export and pip install commands above
+## Then run the export and pip install commands above
 export CUDA_HOME=/usr/local/cuda
 export BUILD_WITH_CUDA=True
 export TORCH_CUDA_ARCH_LIST="8.6"  # RTX 3070 is Arch 8.6. Helps compiler focus.
 
-# Install in editable mode
+## Install in editable mode
 pip install -e . --no-build-isolation --verbose
 
 find $(dirname $(dirname $(which python))) -name "libc10.so"
@@ -39,16 +43,10 @@ python run_record.py --output_dir <demo_folder>
 
 ### 3. **Data Processing Pipeline**
 ```bash
-# Standard automatic segmentation (GroundingDINO + SAM2)
 python process_data.py --base_path ./data/different_types --case_name <demo_folder> --category "<your_category>"
-
-# With manual segmentation for difficult objects or controllers (e.g. robot grippers)
-python process_data.py --case_name demo_63 --manual_controller_mask --manual_object_mask
-
-# Selective manual segmentation
-python process_data.py --case_name demo_63 --manual_controller_mask --category "cloth" 
+python process_data.py --base_path ./data/different_types --case_name demo_63 --category "tangled metal chips" --controller glove --box_threshold 0.20 --shape_prior
 ```
-*This runs segmentation (manual or auto), tracking, 3D lifting, shape prior, and sampling. See the Appendix for the manual annotation workflow.*
+*This runs segmentation, tracking, 3D lifting, shape prior, and sampling.*
 
 ---
 
@@ -132,42 +130,6 @@ python visualize_render_results.py --case_name <demo_folder>
 python visualize_material.py --case_name <demo_folder>
 python visualize_force.py --case_name <demo_folder>
 ```
-
----
-
-## Appendix: Manual Segmentation Tool
-
-When GroundingDINO fails to segment specific objects (like robot grippers or complex textures), you can use the interactive manual segmentation tool.
-
-### Features
-*   **Segment Anything 2 (SAM2)**: Uses SAM2 for high-quality single-frame segmentation and video propagation.
-*   **Propagation & Review**: Propagate your initial segmentation to all frames and scrub through the video to check for errors.
-*   **Correction Mode**: Pause the review at any frame, add more points or boxes to fix the mask, and re-propagate with the new information.
-
-### Workflow
-When running `process_data.py` with `--manual_controller_mask` or `--manual_object_mask`, the script will open an interactive window for each camera and object:
-
-1.  **Annotation Phase**:
-    *   **Left Click**: Add a positive point.
-    *   **Right Click**: Add a negative point.
-    *   **Click & Drag**: Draw a bounding box.
-    *   **Keys**:
-        *   `z`: Undo last annotation.
-        *   `Enter`: Save current frame's mask and start propagation.
-        *   `q`: Quit/Skip.
-
-2.  **Review Phase**:
-    *   **Space**: Play/Pause propagation review.
-    *   **Left/Right Arrow**: Navigate frame by frame.
-    *   **Keys**:
-        *   `c`: Enter **Correction Mode** at the current frame.
-        *   `s`: Save current video masks (if propagation is satisfactory).
-        *   `r`: Restart from annotation phase.
-
-3.  **Correction Phase**:
-    *   Add new points/boxes to refine the mask on a failing frame.
-    *   `Enter`: Re-propagate taking the current correction (and all previous keyframes) into account.
-    *   `z`: Undo current frame's edits.
 
 ---
 
