@@ -5,6 +5,7 @@ from qqtt.utils.logger import StreamToLogger, logging
 import random
 import numpy as np
 import sys
+import os
 import torch
 import pickle
 import json
@@ -31,10 +32,12 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--base_path", type=str, required=True)
     parser.add_argument("--case_name", type=str, required=True)
-    parser.add_argument("--train_frame", type=int, required=True)
+    parser.add_argument("--train_frame", type=int, default=None)
     parser.add_argument("--max_iter", type=int, default=20)
     parser.add_argument("--hardening_factor", type=float, default=None)
     parser.add_argument("--enable_plasticity", action="store_true")
+    parser.add_argument("--enable_breakage", action="store_true")
+    parser.add_argument("--break_strain", type=float, default=None)
     parser.add_argument("--sim_method", type=str, default="spring_mass", choices=["spring_mass", "xpbd"])
     args = parser.parse_args()
 
@@ -42,6 +45,15 @@ if __name__ == "__main__":
     case_name = args.case_name
     train_frame = args.train_frame
     max_iter = args.max_iter
+
+    # If train_frame not provided, read it from split.json
+    if train_frame is None:
+        split_path = f"{base_path}/{case_name}/split.json"
+        assert os.path.exists(split_path), f"--train_frame not provided and split.json not found at {split_path}"
+        with open(split_path, "r") as f:
+            split_data = json.load(f)
+        train_frame = split_data["train"][1]
+        logger.info(f"train_frame not provided, read from split.json: {train_frame}")
 
     if "cloth" in case_name or "package" in case_name:
         cfg.load_from_yaml("configs/cloth.yaml")
@@ -71,10 +83,20 @@ if __name__ == "__main__":
         cfg.hardening_factor = args.hardening_factor
     if args.enable_plasticity:
         cfg.enable_plasticity = True
+    if args.enable_breakage:
+        cfg.enable_breakage = True
+    if args.break_strain is not None:
+        cfg.break_strain = args.break_strain
     if args.sim_method:
         cfg.sim_method = args.sim_method
 
-    base_dir = f"experiments_optimization/{case_name}_ep" if cfg.enable_plasticity else f"experiments_optimization/{case_name}"
+    # Build experiment directory suffix based on enabled features
+    suffix = ""
+    if cfg.enable_plasticity:
+        suffix += "_ep"
+    if cfg.enable_breakage:
+        suffix += "_brk"
+    base_dir = f"experiments_optimization/{case_name}{suffix}"
 
     logger.set_log_file(path=base_dir, name="optimize_cma_log")
     optimizer = OptimizerCMA(
