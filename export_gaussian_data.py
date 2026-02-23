@@ -4,6 +4,7 @@ import json
 import pickle
 import numpy as np
 import open3d as o3d
+from argparse import ArgumentParser
 
 base_path = "./data/different_types"
 output_path = "./data/gaussian_data"
@@ -17,12 +18,21 @@ def existDir(dir_path):
 
 existDir(output_path)
 
+parser = ArgumentParser()
+parser.add_argument("--case_name", type=str, default=None,
+                    help="If provided, only process this single case instead of the full CSV.")
+args = parser.parse_args()
+
 with open("data_config.csv", newline="", encoding="utf-8") as csvfile:
     reader = csv.reader(csvfile)
     for row in reader:
         case_name = row[0]
         category = row[1]
         shape_prior = row[2]
+
+        # Filter to a single case when --case_name is specified
+        if args.case_name is not None and case_name != args.case_name:
+            continue
 
         if not os.path.exists(f"{base_path}/{case_name}"):
             continue

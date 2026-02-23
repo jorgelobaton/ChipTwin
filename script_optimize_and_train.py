@@ -4,6 +4,8 @@ Usage examples:
     python script_optimize_and_train.py --base_path ./data/different_types --case_name demo_64
     python script_optimize_and_train.py --base_path ./data/different_types --case_name demo_64 --enable_plasticity
     python script_optimize_and_train.py --base_path ./data/different_types --case_name demo_64 --enable_plasticity --enable_breakage
+    python script_optimize_and_train.py --base_path ./data/different_types --case_name demo_70 --run_gs
+    python script_optimize_and_train.py --base_path ./data/different_types --case_name demo_70 --run_gs --gs_iterations 10000 --gs_lambda_depth 0.001 --gs_lambda_seg 1.0
 """
 import os
 import sys
@@ -60,6 +62,22 @@ if __name__ == "__main__":
     parser.add_argument("--skip_optimize", action="store_true", help="Skip optimize_cma step")
     parser.add_argument("--skip_train", action="store_true", help="Skip train_warp step")
     parser.add_argument("--skip_inference", action="store_true", help="Skip inference_warp step")
+
+    # Gaussian Splatting steps (opt-in)
+    parser.add_argument("--run_gs", action="store_true",
+                        help="Also run export_gaussian_data and gs_train before optimize/train.")
+    parser.add_argument("--gs_iterations", type=int, default=10000,
+                        help="Number of gs_train iterations (default: 10000).")
+    parser.add_argument("--gs_lambda_depth", type=float, default=0.001)
+    parser.add_argument("--gs_lambda_normal", type=float, default=0.0)
+    parser.add_argument("--gs_lambda_anisotropic", type=float, default=0.0)
+    parser.add_argument("--gs_lambda_seg", type=float, default=1.0)
+    parser.add_argument("--gs_init_opt", type=str, default="hybrid",
+                        help="gs_train --gs_init_opt value (default: hybrid).")
+    parser.add_argument("--gs_no_isotropic", action="store_true",
+                        help="Disable --isotropic flag in gs_train (isotropic is on by default).")
+    parser.add_argument("--gs_no_masks", action="store_true",
+                        help="Disable --use_masks flag in gs_train (use_masks is on by default).")
     args = parser.parse_args()
 
     base_path = args.base_path
@@ -78,6 +96,51 @@ if __name__ == "__main__":
         print(f"[INFO] train_frame not provided, read from split.json: {train_frame}")
 
     extra_flags = build_extra_flags(args)
+
+    # ── Step 0: export_gaussian_data ─────────────────────────────────────────
+    if args.run_gs:
+        export_cmd = (
+            f"python export_gaussian_data.py"
+            f" --case_name {case_name}"
+        )
+        print(f"\n[STEP 0] Running: {export_cmd}\n")
+        ret = os.system(export_cmd)
+        if ret != 0:
+            print(f"[ERROR] export_gaussian_data.py failed with exit code {ret}. Aborting.")
+            sys.exit(ret)
+
+        # ── Step 0.5: gs_train ───────────────────────────────────────────────
+        gs_model_path = (
+            f"./gaussian_output/{case_name}/"
+            f"init={args.gs_init_opt}"
+            f"_iso={not args.gs_no_isotropic}"
+            f"_ldepth={args.gs_lambda_depth}"
+            f"_lnormal={args.gs_lambda_normal}"
+            f"_laniso_{args.gs_lambda_anisotropic}"
+            f"_lseg={args.gs_lambda_seg}"
+        )
+        gs_train_cmd = (
+            f"python gs_train.py"
+            f" -s ./data/gaussian_data/{case_name}"
+            f" -m {gs_model_path}"
+            f" --iterations {args.gs_iterations}"
+            f" --lambda_depth {args.gs_lambda_depth}"
+            f" --lambda_normal {args.gs_lambda_normal}"
+            f" --lambda_anisotropic {args.gs_lambda_anisotropic}"
+            f" --lambda_seg {args.gs_lambda_seg}"
+            f" --gs_init_opt '{args.gs_init_opt}'"
+        )
+        if not args.gs_no_isotropic:
+            gs_train_cmd += " --isotropic"
+        if not args.gs_no_masks:
+            gs_train_cmd += " --use_masks"
+        print(f"\n[STEP 0.5] Running: {gs_train_cmd}\n")
+        ret = os.system(gs_train_cmd)
+        if ret != 0:
+            print(f"[ERROR] gs_train.py failed with exit code {ret}. Aborting.")
+            sys.exit(ret)
+    else:
+        print("\n[STEP 0 / 0.5] Skipping export_gaussian_data + gs_train (use --run_gs to enable).\n")
 
     # ── Step 1: optimize ─────────────────────────────────────────────────────
     if not args.skip_optimize:
