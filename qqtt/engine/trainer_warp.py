@@ -41,6 +41,7 @@ import copy
 import time
 import threading
 import time
+import math
 
 
 class InvPhyTrainerWarp:
@@ -1981,7 +1982,7 @@ class InvPhyTrainerWarp:
         )
         return view
 
-    def visualize_force(self, model_path, gs_path, n_ctrl_parts=2, force_scale=30000):
+    def visualize_force(self, model_path, gs_path, n_ctrl_parts=2, force_scale=30000, no_gaussians=False):
         # Load the model
         logger.info(f"Load model from {model_path}")
         checkpoint = torch.load(model_path, map_location=cfg.device)
@@ -2006,24 +2007,24 @@ class InvPhyTrainerWarp:
             collide_object_fric.detach().clone(),
         )
 
-        video_path = f"{cfg.base_dir}/force_visualization.mp4"
-
-        vis_cam_idx = 0
         FPS = cfg.FPS
         width, height = cfg.WH
-        intrinsic = cfg.intrinsics[vis_cam_idx]
-        w2c = cfg.w2cs[vis_cam_idx]
 
-        gaussians = GaussianModel(sh_degree=3)
-        gaussians.load_ply(gs_path)
-        gaussians = remove_gaussians_with_low_opacity(gaussians, 0.1)
-        gaussians.isotropic = True
-        current_pos = gaussians.get_xyz
-        current_rot = gaussians.get_rotation
-        use_white_background = True  # set to True for white background
-        bg_color = [1, 1, 1] if use_white_background else [0, 0, 0]
-        background = torch.tensor(bg_color, dtype=torch.float32, device=cfg.device)
-        view = self._create_gs_view(w2c, intrinsic, height, width)
+        use_white_background = True
+        if not no_gaussians:
+            gaussians = GaussianModel(sh_degree=3)
+            gaussians.load_ply(gs_path)
+            gaussians = remove_gaussians_with_low_opacity(gaussians, 0.1)
+            gaussians.isotropic = True
+            current_pos = gaussians.get_xyz.clone()
+            current_rot = gaussians.get_rotation.clone()
+            bg_color = [1, 1, 1] if use_white_background else [0, 0, 0]
+            background = torch.tensor(bg_color, dtype=torch.float32, device=cfg.device)
+        else:
+            gaussians = None
+            current_pos = None
+            current_rot = None
+            background = None
         prev_x = None
         relations = None
         weights = None
@@ -2078,9 +2079,10 @@ class InvPhyTrainerWarp:
                 force_object_points[i], device=cfg.device
             )
 
-        # Start to visualize the stuffs
-        logger.info("Visualizing the simulation")
-        # Visualize the whole simulation using current set of parameters in the physical simulator
+        # -----------------------------------------------------------------
+        # Pass 1: run simulation, collect 3D physics state
+        # -----------------------------------------------------------------
+        logger.info("Pass 1/3: simulating and collecting 3D physics data")
         frame_len = self.dataset.frame_len
         self.simulator.set_init_state(
             self.simulator.wp_init_vertices, self.simulator.wp_init_velocities
@@ -2089,216 +2091,206 @@ class InvPhyTrainerWarp:
             self.simulator.wp_states[0].wp_x, requires_grad=False
         ).clone()
 
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(visible=False, width=width, height=height)
-        fourcc = cv2.VideoWriter_fourcc(*"avc1")  # Codec for .mp4 file format
-        video_writer = cv2.VideoWriter(video_path, fourcc, FPS, (width, height))
+        physics_data = [] # stores data needed for rendering
+        all_force_mags = []
 
-        frame_path = f"{cfg.overlay_path}/{vis_cam_idx}/0.png"
-        frame = cv2.imread(frame_path)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        for i in tqdm(range(frame_len), desc="Simulating"):
+            if i > 0:
+                if cfg.data_type == "real":
+                    self.simulator.set_controller_target(i, pure_inference=True)
+                if self.simulator.object_collision_flag:
+                    self.simulator.update_collision_graph()
 
-        results = render_gaussian(view, gaussians, None, background)
-        rendering = results["render"]  # (4, H, W)
-        image = rendering.permute(1, 2, 0).detach().cpu().numpy()
-
-        image = image.clip(0, 1)
-        if use_white_background:
-            image_mask = np.logical_and(
-                (image != 1.0).any(axis=2), image[:, :, 3] > 100 / 255
-            )
-        else:
-            image_mask = np.logical_and(
-                (image != 0.0).any(axis=2), image[:, :, 3] > 100 / 255
-            )
-        image[~image_mask, 3] = 0
-
-        alpha = image[..., 3:4]
-        rgb = image[..., :3] * 255
-        frame = alpha * rgb + (1 - alpha) * frame
-        frame = frame.astype(np.uint8)
-
-        force_arrow_meshes = []
-        for j in range(n_ctrl_parts):
-            # Calculate the center of the force_object_points
-            force_center = (
-                torch.mean(prev_x[force_object_points[j]], dim=0).cpu().numpy()
-            )
-            # Calculate the force vector
-            force_vector = (
-                self.get_force_vector(
-                    prev_x,
-                    force_springs[j],
-                    force_rest_lengths[j],
-                    force_spring_Y[j],
-                    self.num_all_points,
-                    self.simulator.controller_points[0],
+                wp.capture_launch(self.simulator.forward_graph)
+                x = wp.to_torch(self.simulator.wp_states[-1].wp_x, requires_grad=False)
+                self.simulator.set_init_state(
+                    self.simulator.wp_states[-1].wp_x,
+                    self.simulator.wp_states[-1].wp_v,
                 )
-                .cpu()
-                .numpy()
-            )
-            # Create arrow mesh in open3d
-            if not (force_vector == 0).all():
-                arrow_mesh = getArrowMesh(
-                    origin=force_center,
-                    end=force_center + force_vector / force_scale,
-                    color=[1, 0, 0],
-                )
-                force_arrow_meshes.append(arrow_mesh)
-                vis.add_geometry(force_arrow_meshes[j])
-        # Adjust the viewpoint
-        view_control = vis.get_view_control()
-        camera_params = o3d.camera.PinholeCameraParameters()
-        intrinsic_parameter = o3d.camera.PinholeCameraIntrinsic(
-            width, height, intrinsic
-        )
-        camera_params.intrinsic = intrinsic_parameter
-        camera_params.extrinsic = w2c
-        view_control.convert_from_pinhole_camera_parameters(
-            camera_params, allow_arbitrary=True
-        )
+                torch.cuda.synchronize()
 
-        force_image = np.asarray(vis.capture_screen_float_buffer(do_render=True))
-        force_image = (force_image * 255).astype(np.uint8)
-        force_vis_mask = np.all(force_image == [255, 255, 255], axis=-1)
-        frame[~force_vis_mask] = force_image[~force_vis_mask]
-
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        # cv2.imshow("Interactive Playground", frame)
-        # cv2.waitKey(0)
-        video_writer.write(frame)
-
-        for i in tqdm(range(1, frame_len)):
-            if cfg.data_type == "real":
-                self.simulator.set_controller_target(i, pure_inference=True)
-            if self.simulator.object_collision_flag:
-                self.simulator.update_collision_graph()
-
-            wp.capture_launch(self.simulator.forward_graph)
-            x = wp.to_torch(self.simulator.wp_states[-1].wp_x, requires_grad=False)
-            # Set the intial state for the next step
-            self.simulator.set_init_state(
-                self.simulator.wp_states[-1].wp_x,
-                self.simulator.wp_states[-1].wp_v,
-            )
-
-            torch.cuda.synchronize()
-
-            with torch.no_grad():
-                # Do LBS on the gaussian kernels
-                prev_particle_pos = prev_x
-                cur_particle_pos = x
-                if relations is None:
-                    relations = get_topk_indices(
-                        prev_x, K=16
-                    )  # only computed in the first iteration
-
-                if weights is None:
-                    weights, weights_indices = knn_weights_sparse(
-                        prev_particle_pos, current_pos, K=16
-                    )  # only computed in the first iteration
-
-                weights = calc_weights_vals_from_indices(
-                    prev_particle_pos, current_pos, weights_indices
-                )
-
-                current_pos, current_rot, _ = interpolate_motions_speedup(
-                    bones=prev_particle_pos,
-                    motions=cur_particle_pos - prev_particle_pos,
-                    relations=relations,
-                    weights=weights,
-                    weights_indices=weights_indices,
-                    xyz=current_pos,
-                    quat=current_rot,
-                )
-
-                # update gaussians with the new positions and rotations
-                gaussians._xyz = current_pos
-                gaussians._rotation = current_rot
-
-            prev_x = x.clone()
-
-            frame_path = f"{cfg.overlay_path}/{vis_cam_idx}/{i}.png"
-            frame = cv2.imread(frame_path)
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            results = render_gaussian(view, gaussians, None, background)
-            rendering = results["render"]  # (4, H, W)
-            image = rendering.permute(1, 2, 0).detach().cpu().numpy()
-
-            image = image.clip(0, 1)
-            if use_white_background:
-                image_mask = np.logical_and(
-                    (image != 1.0).any(axis=2), image[:, :, 3] > 100 / 255
-                )
+                with torch.no_grad():
+                    prev_particle_pos = prev_x
+                    cur_particle_pos = x
+                    if not no_gaussians:
+                        if relations is None:
+                            relations = get_topk_indices(prev_x, K=16)
+                        if weights is None:
+                            weights, weights_indices = knn_weights_sparse(
+                                prev_particle_pos, current_pos, K=16
+                            )
+                        weights = calc_weights_vals_from_indices(
+                            prev_particle_pos, current_pos, weights_indices
+                        )
+                        current_pos, current_rot, _ = interpolate_motions_speedup(
+                            bones=prev_particle_pos,
+                            motions=cur_particle_pos - prev_particle_pos,
+                            relations=relations,
+                            weights=weights,
+                            weights_indices=weights_indices,
+                            xyz=current_pos,
+                            quat=current_rot,
+                        )
+                prev_x = x.clone()
             else:
-                image_mask = np.logical_and(
-                    (image != 0.0).any(axis=2), image[:, :, 3] > 100 / 255
-                )
-            image[~image_mask, 3] = 0
+                x = prev_x
 
-            alpha = image[..., 3:4]
-            rgb = image[..., :3] * 255
-            frame = alpha * rgb + (1 - alpha) * frame
-            frame = frame.astype(np.uint8)
-
-            for arrow_mesh in force_arrow_meshes:
-                vis.remove_geometry(arrow_mesh)
-
-            force_arrow_meshes = []
+            # ---- compute 3D forces per control part ----
+            ctrl_pts = self.simulator.controller_points[i] if i > 0 else self.simulator.controller_points[0]
+            force_info_3d = []
             for j in range(n_ctrl_parts):
-                # Calculate the center of the force_object_points
-                force_center = (
-                    torch.mean(x[force_object_points[j]], dim=0).cpu().numpy()
-                )
-                # Calculate the force vector
-                force_vector = (
-                    self.get_force_vector(
-                        x,
-                        force_springs[j],
-                        force_rest_lengths[j],
-                        force_spring_Y[j],
-                        self.num_all_points,
-                        self.simulator.controller_points[i],
-                    )
-                    .cpu()
-                    .numpy()
-                )
-                if not (force_vector == 0).all():
-                    # Create arrow mesh in open3d
-                    arrow_mesh = getArrowMesh(
-                        origin=force_center,
-                        end=force_center + force_vector / force_scale,
-                        color=[1, 0, 0],
-                    )
-                force_arrow_meshes.append(arrow_mesh)
-                vis.add_geometry(force_arrow_meshes[j])
+                force_center_3d = torch.mean(x[force_object_points[j]], dim=0).clone()
+                force_vec_3d = self.get_force_vector(
+                    x, force_springs[j], force_rest_lengths[j],
+                    force_spring_Y[j], self.num_all_points, ctrl_pts,
+                ).clone()
+                mag = float(torch.norm(force_vec_3d))
+                force_info_3d.append({
+                    "center": force_center_3d.cpu().numpy(),
+                    "vec": force_vec_3d.cpu().numpy(),
+                    "mag": mag
+                })
+                if mag > 1e-6:
+                    all_force_mags.append(mag)
 
-            view_control = vis.get_view_control()
-            camera_params = o3d.camera.PinholeCameraParameters()
-            intrinsic_parameter = o3d.camera.PinholeCameraIntrinsic(
-                width, height, intrinsic
-            )
-            camera_params.intrinsic = intrinsic_parameter
-            camera_params.extrinsic = w2c
-            view_control.convert_from_pinhole_camera_parameters(
-                camera_params, allow_arbitrary=True
-            )
+            physics_data.append({
+                "x": x.clone().cpu(),
+                "gs_xyz": current_pos.clone().cpu() if not no_gaussians else None,
+                "gs_rot": current_rot.clone().cpu() if not no_gaussians else None,
+                "forces": force_info_3d
+            })
 
-            vis.poll_events()
-            vis.update_renderer()
+        # Calculate global Force Stats for scaling (Pass 2)
+        if len(all_force_mags) > 0:
+            mag_min = min(all_force_mags)
+            mag_max = max(all_force_mags)
+            sorted_mags = sorted(all_force_mags)
+            mag_low = sorted_mags[int(len(sorted_mags) * 0.45)]
+        else:
+            mag_min, mag_max, mag_low = 1.0, 1.0, 1.0
+        
+        log_low = math.log(max(mag_low, 1e-6))
+        log_high = math.log(max(mag_max, 1e-6))
+        log_range = log_high - log_low if log_high > log_low else 1.0
+        
+        logger.info(
+            f"Pass 2/3: Force stats calculated. min={mag_min:.2f}, max={mag_max:.2f}, "
+            f"p45 (arrow floor)={mag_low:.2f}"
+        )
 
-            force_image = np.asarray(vis.capture_screen_float_buffer(do_render=True))
-            force_image = (force_image * 255).astype(np.uint8)
-            force_vis_mask = np.all(force_image == [255, 255, 255], axis=-1)
-            frame[~force_vis_mask] = force_image[~force_vis_mask]
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            video_writer.write(frame)
+        # -----------------------------------------------------------------
+        # Pass 3: Loop over cameras, project & render & write videos
+        # -----------------------------------------------------------------
+        n_cams = len(cfg.intrinsics)
+        logger.info(f"Pass 3/3: Rendering {n_cams} camera views")
 
-            # cv2.imshow("Interactive Playground", frame)
-            # cv2.waitKey(0)
-        vis.destroy_window()
-        video_writer.release()
+        fourcc = cv2.VideoWriter_fourcc(*"avc1")
+        force_colors = [(0, 0, 255), (255, 0, 0)]  # Red, Blue
+        min_arrow_px, max_arrow_px, margin_px = 20, 150, 10
+
+        for cam_idx in range(n_cams):
+            intrinsic = cfg.intrinsics[cam_idx]
+            w2c = cfg.w2cs[cam_idx]
+            proj_mat = intrinsic @ w2c[:3, :]
+            view = self._create_gs_view(w2c, intrinsic, height, width) if not no_gaussians else None
+
+            # Resolve camera folder name
+            cam_name = cam_idx
+            if hasattr(cfg, 'camera_ids') and cfg.camera_ids:
+                try:
+                    cam_name = cfg.camera_ids[cam_idx]
+                except IndexError:
+                    pass
+
+            suffix_tag = "_noGS" if no_gaussians else ""
+            video_path = f"{cfg.base_dir}/force_visualization_{cam_name}{suffix_tag}.mp4"
+            video_writer = cv2.VideoWriter(video_path, fourcc, FPS, (width, height))
+            logger.info(f"Rendering camera {cam_idx}: {cam_name}")
+
+            # For no_gaussians: render all frames at once via visualize_pc (same path as inference)
+            if no_gaussians:
+                all_x = torch.stack([pd["x"] for pd in physics_data], dim=0)  # (T, N, 3)
+                pcd_frames = visualize_pc(
+                    all_x[:, :self.num_all_points, :],
+                    self.object_colors,
+                    self.simulator.controller_points,
+                    visualize=False,
+                    save_video=False,
+                    vis_cam_idx=cam_idx,
+                    hide_fill_points=True,
+                    return_frames=True,
+                )  # list of T RGB uint8 frames, already composited over background
+
+            for i in tqdm(range(frame_len), desc=f"Cam {cam_name}"):
+                p_data = physics_data[i]
+
+                if no_gaussians:
+                    frame = pcd_frames[i]
+                else:
+                    frame_path = f"{cfg.overlay_path}/{cam_name}/{i}.png"
+                    frame = cv2.imread(frame_path)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                    gaussians._xyz = p_data["gs_xyz"].to(cfg.device)
+                    gaussians._rotation = p_data["gs_rot"].to(cfg.device)
+
+                    # Gaussian rendering
+                    results = render_gaussian(view, gaussians, None, background)
+                    rendering = results["render"].permute(1, 2, 0).detach().cpu().numpy().clip(0, 1)
+                    if use_white_background:
+                        image_mask = np.logical_and((rendering != 1.0).any(axis=2), rendering[:, :, 3] > 0.4)
+                    else:
+                        image_mask = np.logical_and((rendering != 0.0).any(axis=2), rendering[:, :, 3] > 0.4)
+                    rendering[~image_mask, 3] = 0
+                    alpha = rendering[..., 3:4]
+                    rgb = rendering[..., :3] * 255
+                    frame = np.ascontiguousarray((alpha * rgb + (1 - alpha) * frame).astype(np.uint8))
+
+                # Draw arrows for this camera
+                for j, f3d in enumerate(p_data["forces"]):
+                    mag = f3d["mag"]
+                    if mag < 1e-6: continue
+
+                    # Project center to 2D
+                    c3d = f3d["center"]
+                    v3d = f3d["vec"]
+                    origin_h = np.append(c3d, 1.0)
+                    p_origin = proj_mat @ origin_h
+                    if p_origin[2] < 1e-6: continue
+                    u0, v0 = p_origin[0] / p_origin[2], p_origin[1] / p_origin[2]
+
+                    # Project direction to 2D
+                    dir_3d = v3d / mag
+                    end_3d = c3d + dir_3d * 0.01 
+                    p_end = proj_mat @ np.append(end_3d, 1.0)
+                    if p_end[2] < 1e-6: continue
+                    u1_dir, v1_dir = p_end[0] / p_end[2], p_end[1] / p_end[2]
+                    dx, dy = u1_dir - u0, v1_dir - v0
+                    d_len = math.sqrt(dx*dx + dy*dy)
+                    dir_2d = np.array([dx/d_len, dy/d_len]) if d_len > 1e-6 else np.array([1, 0])
+
+                    # Scale arrow
+                    t = (math.log(mag) - log_low) / log_range
+                    t = max(0.0, min(1.0, t))
+                    arrow_len = min_arrow_px + t * (max_arrow_px - min_arrow_px)
+
+                    u1 = u0 + dir_2d[0] * arrow_len
+                    v1 = v0 + dir_2d[1] * arrow_len
+
+                    # Clamp
+                    u0, v0 = np.clip([u0, v0], margin_px, [width-margin_px, height-margin_px])
+                    u1, v1 = np.clip([u1, v1], margin_px, [width-margin_px, height-margin_px])
+
+                    color = force_colors[j % len(force_colors)]
+                    cv2.arrowedLine(frame, (int(u0), int(v0)), (int(u1), int(v1)), color, 3, tipLength=0.25)
+                    cv2.putText(frame, f"{mag:.0f}", (int(u1)+6, int(v1)-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+
+                video_writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+            video_writer.release()
+            logger.info(f"Video saved: {video_path}")
+
+        logger.info("Force visualization for all cameras completed.")
 
     def get_force_vector(
         self, x, springs, rest_lengths, spring_Y, num_object_points, controller_points

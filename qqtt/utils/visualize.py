@@ -19,6 +19,7 @@ def visualize_pc(
     save_path=None,
     vis_cam_idx=0,
     hide_fill_points=False,
+    return_frames=False,
 ):
     # Deprecated function, use visualize_pc instead
     FPS = cfg.FPS
@@ -76,6 +77,9 @@ def visualize_pc(
         fourcc = cv2.VideoWriter_fourcc(*"avc1")  # Codec for .mp4 file format
         video_writer = cv2.VideoWriter(save_path, fourcc, FPS, (width, height))
 
+    if return_frames:
+        collected_frames = []  # list of RGB uint8 arrays
+
     if controller_points is not None:
         controller_meshes = []
         prev_center = []
@@ -132,7 +136,7 @@ def visualize_pc(
         vis.update_renderer()
 
         # Capture frame and write to video file if save_video is True
-        if save_video:
+        if save_video or return_frames:
             frame = np.asarray(vis.capture_screen_float_buffer(do_render=True))
             frame = (frame * 255).astype(np.uint8)
             if cfg.overlay_path is not None:
@@ -151,9 +155,13 @@ def visualize_pc(
                 overlay = cv2.imread(image_path)
                 overlay = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
                 frame[mask] = overlay[mask]
-            # Convert RGB to BGR
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            video_writer.write(frame)
+
+            if return_frames:
+                # Store as RGB (arrows will be drawn by the caller)
+                collected_frames.append(np.ascontiguousarray(frame))
+            if save_video:
+                # Convert RGB to BGR for video writer
+                video_writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
 
         if visualize:
             time.sleep(1 / FPS)
@@ -161,3 +169,6 @@ def visualize_pc(
     vis.destroy_window()
     if save_video:
         video_writer.release()
+
+    if return_frames:
+        return collected_frames

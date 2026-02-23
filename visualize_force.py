@@ -38,6 +38,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--case_name", type=str, default="double_lift_cloth_3")
     parser.add_argument("--n_ctrl_parts", type=int, default=2)
+    parser.add_argument("--enable_plasticity", action="store_true")
+    parser.add_argument("--enable_breakage", action="store_true")
+    parser.add_argument("--no_gaussians", action="store_true",
+                        help="Skip Gaussian rendering; overlay sim particle dots instead")
     args = parser.parse_args()
 
     base_path = args.base_path
@@ -48,10 +52,17 @@ if __name__ == "__main__":
     else:
         cfg.load_from_yaml("configs/real.yaml")
 
-    base_dir = f"./experiments/{case_name}"
+    # Build experiment directory suffix based on enabled features
+    suffix = ""
+    if args.enable_plasticity:
+        suffix += "_ep"
+    if args.enable_breakage:
+        suffix += "_brk"
+
+    base_dir = f"./experiments/{case_name}{suffix}"
 
     # Read the first-satage optimized parameters to set the indifferentiable parameters
-    optimal_path = f"./experiments_optimization/{case_name}/optimal_params.pkl"
+    optimal_path = f"./experiments_optimization/{case_name}{suffix}/optimal_params.pkl"
     logger.info(f"Load optimal parameters from: {optimal_path}")
     assert os.path.exists(
         optimal_path
@@ -71,6 +82,13 @@ if __name__ == "__main__":
     cfg.intrinsics = np.array(data["intrinsics"])
     cfg.WH = data["WH"]
     cfg.overlay_path = f"{base_path}/{case_name}/color"
+    if "camera_ids" in data:
+        cfg.camera_ids = data["camera_ids"]
+
+    if args.enable_plasticity:
+        cfg.enable_plasticity = True
+    if args.enable_breakage:
+        cfg.enable_breakage = True
 
     exp_name = "init=hybrid_iso=True_ldepth=0.001_lnormal=0.0_laniso_0.0_lseg=1.0"
     gaussians_path = f"{args.gaussian_path}/{case_name}/{exp_name}/point_cloud/iteration_10000/point_cloud.ply"
@@ -82,7 +100,8 @@ if __name__ == "__main__":
         pure_inference_mode=True,
     )
 
-    best_model_path = glob.glob(f"experiments/{case_name}/train/best_*.pth")[0]
+    best_model_path = glob.glob(f"experiments/{case_name}{suffix}/train/best_*.pth")[0]
     trainer.visualize_force(
-        best_model_path, gaussians_path, args.n_ctrl_parts
+        best_model_path, gaussians_path, args.n_ctrl_parts,
+        no_gaussians=args.no_gaussians,
     )
