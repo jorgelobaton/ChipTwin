@@ -1,2 +1,4 @@
 from .cma_optimize_warp import OptimizerCMA
+from .cma_optimize_warp_multi import OptimizerCMAMulti
 from .trainer_warp import InvPhyTrainerWarp
+from .trainer_warp_multi import InvPhyTrainerMulti

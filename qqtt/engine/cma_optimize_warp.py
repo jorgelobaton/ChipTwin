@@ -207,7 +207,7 @@ class OptimizerCMA:
         )
         init_object_radius = self.normalize(cfg.object_radius, 0.01, 0.05)
         init_object_max_neighbours = self.normalize(cfg.object_max_neighbours, 10, 50)
-        init_controller_radius = self.normalize(cfg.controller_radius, 0.01, 0.15)
+        init_controller_radius = self.normalize(cfg.controller_radius, 0.03, 0.15)
         init_controller_max_neighbours = self.normalize(
             cfg.controller_max_neighbours, 10, 80
         )
@@ -215,9 +215,9 @@ class OptimizerCMA:
         init_collide_fric = self.normalize(cfg.collide_fric, 0, 2)
         init_collide_object_elas = cfg.collide_object_elas
         init_collide_object_fric = self.normalize(cfg.collide_object_fric, 0, 2)
-        init_collision_dist = self.normalize(cfg.collision_dist, 0.01, 0.05)
-        init_drag_damping = self.normalize(cfg.drag_damping, 0, 100)
-        init_dashpot_damping = self.normalize(cfg.dashpot_damping, 0, 200)
+        init_collision_dist = self.normalize(cfg.collision_dist, 0.01, 0.08)
+        init_drag_damping = self.normalize(cfg.drag_damping, 0, 20)
+        init_dashpot_damping = self.normalize(cfg.dashpot_damping, 0, 150)
 
         x_init = [
             init_global_spring_Y,
@@ -240,6 +240,10 @@ class OptimizerCMA:
             x_init.append(init_hardening_factor)
             x_init.append(init_yield_strain)
 
+        if cfg.enable_breakage:
+            init_break_strain = self.normalize(cfg.break_strain, 0.05, 2.0)
+            x_init.append(init_break_strain)
+
         self.error_func(
             x_init, visualize=True, video_path=f"{cfg.base_dir}/optimizeCMA/init.mp4"
         )
@@ -259,15 +263,15 @@ class OptimizerCMA:
         )
         final_object_radius = self.denormalize(optimal_x[1], 0.01, 0.05)
         final_object_max_neighbours = int(self.denormalize(optimal_x[2], 10, 50))
-        final_controller_radius = self.denormalize(optimal_x[3], 0.01, 0.15)
+        final_controller_radius = self.denormalize(optimal_x[3], 0.03, 0.15)
         final_controller_max_neighbours = int(self.denormalize(optimal_x[4], 10, 80))
         final_collide_elas = optimal_x[5]
         final_collide_fric = self.denormalize(optimal_x[6], 0, 2)
         final_collide_object_elas = optimal_x[7]
         final_collide_object_fric = self.denormalize(optimal_x[8], 0, 2)
-        final_collision_dist = self.denormalize(optimal_x[9], 0.01, 0.05)
-        final_drag_damping = self.denormalize(optimal_x[10], 0, 100)
-        final_dashpot_damping = self.denormalize(optimal_x[11], 0, 200)
+        final_collision_dist = self.denormalize(optimal_x[9], 0.01, 0.08)
+        final_drag_damping = self.denormalize(optimal_x[10], 0, 20)
+        final_dashpot_damping = self.denormalize(optimal_x[11], 0, 150)
 
         if cfg.enable_plasticity:
             final_hardening_factor = optimal_x[12]
@@ -275,6 +279,13 @@ class OptimizerCMA:
         else:
             final_hardening_factor = cfg.hardening_factor
             final_yield_strain = cfg.yield_strain
+
+        # Break strain index comes after the base 12 dims + plasticity dims (if any)
+        breakage_idx = 12 + (2 if cfg.enable_plasticity else 0)
+        if cfg.enable_breakage:
+            final_break_strain = self.denormalize(optimal_x[breakage_idx], 0.05, 2.0)
+        else:
+            final_break_strain = cfg.break_strain
 
         self.error_func(
             optimal_x,
@@ -297,6 +308,7 @@ class OptimizerCMA:
         optimal_results["dashpot_damping"] = final_dashpot_damping
         optimal_results["hardening_factor"] = final_hardening_factor
         optimal_results["yield_strain"] = final_yield_strain
+        optimal_results["break_strain"] = final_break_strain
 
         # Save out all the initialized parameters
         with open(f"{cfg.base_dir}/optimal_params.pkl", "wb") as f:
@@ -308,15 +320,26 @@ class OptimizerCMA:
         )
         object_radius = self.denormalize(parameters[1], 0.01, 0.05)
         object_max_neighbours = int(self.denormalize(parameters[2], 10, 50))
-        controller_radius = self.denormalize(parameters[3], 0.01, 0.15)
+        controller_radius = self.denormalize(parameters[3], 0.03, 0.15)
         controller_max_neighbours = int(self.denormalize(parameters[4], 10, 80))
         collide_elas = parameters[5]
         collide_fric = self.denormalize(parameters[6], 0, 2)
         collide_object_elas = parameters[7]
         collide_object_fric = self.denormalize(parameters[8], 0, 2)
-        collision_dist = self.denormalize(parameters[9], 0.01, 0.05)
-        drag_damping = self.denormalize(parameters[10], 0, 100)
-        dashpot_damping = self.denormalize(parameters[11], 0, 200)
+        collision_dist = self.denormalize(parameters[9], 0.01, 0.08)
+        drag_damping = self.denormalize(parameters[10], 0, 20)
+        dashpot_damping = self.denormalize(parameters[11], 0, 150)
+
+        # Log the velocity retention per frame so we can detect over-damping
+        import math
+        vel_retained = math.exp(-cfg.dt * drag_damping) ** cfg.num_substeps
+        if visualize:
+            logger.info(
+                f"[CMA Params] spring_Y={global_spring_Y:.1f}, drag={drag_damping:.2f}, "
+                f"dashpot={dashpot_damping:.1f}, ctrl_r={controller_radius:.4f}, "
+                f"ctrl_nn={controller_max_neighbours}, obj_r={object_radius:.4f}, "
+                f"vel_retained/frame={vel_retained:.3f}"
+            )
 
         if cfg.enable_plasticity:
             hardening_factor = parameters[12]
@@ -324,6 +347,12 @@ class OptimizerCMA:
         else:
             hardening_factor = cfg.hardening_factor
             yield_strain = cfg.yield_strain
+
+        breakage_idx = 12 + (2 if cfg.enable_plasticity else 0)
+        if cfg.enable_breakage:
+            break_strain = self.denormalize(parameters[breakage_idx], 0.05, 2.0)
+        else:
+            break_strain = cfg.break_strain
 
         # Initialize the vertices, springs, rest lengths and masses
         if self.controller_points is None:
@@ -383,6 +412,9 @@ class OptimizerCMA:
             yield_strain=yield_strain,
             hardening_factor=hardening_factor,
             enable_plasticity=cfg.enable_plasticity,
+            break_strain=break_strain,
+            enable_breakage=cfg.enable_breakage,
+            max_stretch_ratio=cfg.max_stretch_ratio,
         )
 
         self.simulator.set_init_state(
