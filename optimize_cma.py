@@ -38,6 +38,18 @@ if __name__ == "__main__":
     parser.add_argument("--enable_plasticity", action="store_true")
     parser.add_argument("--enable_breakage", action="store_true")
     parser.add_argument("--break_strain", type=float, default=None)
+    parser.add_argument(
+        "--plasticity_smooth_weight",
+        type=float,
+        default=None,
+        help="Laplacian smoothness weight for per-spring yield/hardening fields (training stage).",
+    )
+    parser.add_argument(
+        "--plasticity_init_noise",
+        type=float,
+        default=None,
+        help="Relative std for init noise on per-spring yield/hardening (training stage).",
+    )
     parser.add_argument("--sim_method", type=str, default="spring_mass", choices=["spring_mass", "xpbd"])
     args = parser.parse_args()
 
@@ -89,6 +101,12 @@ if __name__ == "__main__":
         cfg.break_strain = args.break_strain
     if args.sim_method:
         cfg.sim_method = args.sim_method
+
+    # Optional physically-motivated priors on per-spring plasticity fields
+    if args.plasticity_smooth_weight is not None:
+        cfg.plasticity_smooth_weight = args.plasticity_smooth_weight
+    if args.plasticity_init_noise is not None:
+        cfg.plasticity_init_noise = args.plasticity_init_noise
 
     # Build experiment directory suffix based on enabled features
     suffix = ""

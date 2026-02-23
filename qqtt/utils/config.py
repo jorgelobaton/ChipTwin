@@ -23,7 +23,7 @@ class Config:
 
         self.object_radius = 0.02
         self.object_max_neighbours = 30
-        self.controller_radius = 0.04
+        self.controller_radius = 0.06
         self.controller_max_neighbours = 50
 
         self.spring_Y_min = 0
@@ -50,9 +50,22 @@ class Config:
         self.yield_strain = 0.1
         self.hardening_factor = 0.0
 
+        # Plasticity parameter field priors (optional)
+        # Use these when learning per-spring yield_strain / hardening_factor.
+        # A small spatial smoothness prior encourages physically plausible
+        # material fields (nearby springs having similar properties).
+        self.plasticity_smooth_weight = 0.0
+        # Tiny random init noise (relative std) to break symmetry when learning.
+        # Example: 0.02 means ~2% std around the scalar init value.
+        self.plasticity_init_noise = 0.0
+
         # Breakage parameters
         self.break_strain = 0.5
         self.enable_breakage = False
+
+        # Max stretch ratio: clamp spring extension to prevent infinite stretching
+        # A value of 3.0 means a spring can stretch to at most 3x its rest length
+        self.max_stretch_ratio = 3.0
 
         # Other parameters for visualization
         self.overlay_path = None

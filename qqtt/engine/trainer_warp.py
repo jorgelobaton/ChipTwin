@@ -162,6 +162,18 @@ class InvPhyTrainerWarp:
             max_stretch_ratio=cfg.max_stretch_ratio,
         )
 
+        # Optional: break symmetry by adding tiny per-spring noise to plasticity params.
+        # This helps the optimizer learn spatially varying fields when appropriate.
+        if (not pure_inference_mode) and cfg.enable_plasticity and getattr(cfg, "plasticity_init_noise", 0.0) > 0:
+            with torch.no_grad():
+                noise_std = float(cfg.plasticity_init_noise)
+                ys = wp.to_torch(self.simulator.wp_yield_strain)
+                hf = wp.to_torch(self.simulator.wp_hardening_factor)
+                ys.mul_(1.0 + noise_std * torch.randn_like(ys))
+                hf.mul_(1.0 + noise_std * torch.randn_like(hf))
+                ys.clamp_(min=0.001, max=1.0)
+                hf.clamp_(min=0.0, max=1.0)
+
         if not pure_inference_mode:
             param_groups = [
                 {"params": [
@@ -413,6 +425,40 @@ class InvPhyTrainerWarp:
                     loss = wp.to_torch(self.simulator.loss, requires_grad=False)
                     total_loss += loss.item()
 
+                    # Optional physically-motivated prior: smooth plasticity parameter fields
+                    # over the spring graph (encourages nearby springs to have similar values).
+                    if cfg.enable_plasticity and getattr(cfg, "plasticity_smooth_weight", 0.0) > 0:
+                        w = float(cfg.plasticity_smooth_weight)
+                        # Only regularize object springs (exclude controller springs).
+                        obj_spr = self.init_springs[: self.num_object_springs]
+                        a = obj_spr[:, 0].long()
+                        b = obj_spr[:, 1].long()
+
+                        ys = wp.to_torch(self.simulator.wp_yield_strain)
+                        hf = wp.to_torch(self.simulator.wp_hardening_factor)
+                        ys_obj = ys[: self.num_object_springs]
+                        hf_obj = hf[: self.num_object_springs]
+
+                        # Build an adjacency Laplacian penalty by scattering spring values to endpoints.
+                        # For each vertex v, take the mean of incident spring values and penalize deviations.
+                        nV = int(self.num_all_points)
+                        device = ys.device
+
+                        def laplacian_penalty(val_spr):
+                            acc = torch.zeros((nV,), device=device)
+                            deg = torch.zeros((nV,), device=device)
+                            acc.index_add_(0, a, val_spr)
+                            acc.index_add_(0, b, val_spr)
+                            one = torch.ones_like(val_spr)
+                            deg.index_add_(0, a, one)
+                            deg.index_add_(0, b, one)
+                            mean = acc / torch.clamp(deg, min=1.0)
+                            diff = (val_spr - mean[a]) ** 2 + (val_spr - mean[b]) ** 2
+                            return diff.mean()
+
+                        reg = laplacian_penalty(ys_obj) + laplacian_penalty(hf_obj)
+                        (w * reg).backward()
+
                     if cfg.use_graph:
                         # Only need to clear the gradient, the tape is created in the graph
                         self.simulator.tape.zero()
@@ -609,7 +655,10 @@ class InvPhyTrainerWarp:
             )
             # Load break_strain if saved in checkpoint
             if "break_strain" in checkpoint:
-                self.simulator.set_break_strain(checkpoint["break_strain"])
+                _bs = checkpoint["break_strain"]
+                if not isinstance(_bs, torch.Tensor):
+                    _bs = torch.tensor(_bs, dtype=torch.float32, device=cfg.device)
+                self.simulator.set_break_strain(_bs.detach().clone())
 
             # Load per-spring plasticity parameters if saved in checkpoint
             if "yield_strain" in checkpoint:
@@ -1164,7 +1213,10 @@ class InvPhyTrainerWarp:
         )
 
         if "break_strain" in checkpoint:
-            self.simulator.set_break_strain(checkpoint["break_strain"].detach().clone())
+            _bs = checkpoint["break_strain"]
+            if not isinstance(_bs, torch.Tensor):
+                _bs = torch.tensor(_bs, dtype=torch.float32, device=cfg.device)
+            self.simulator.set_break_strain(_bs.detach().clone())
 
         # Pre-compute force spring data (always needed for force visualization / constant-force control)
         force_springs_data = None

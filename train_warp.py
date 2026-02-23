@@ -32,6 +32,18 @@ if __name__ == "__main__":
     parser.add_argument("--enable_plasticity", action="store_true")
     parser.add_argument("--enable_breakage", action="store_true")
     parser.add_argument("--break_strain", type=float, default=None)
+    parser.add_argument(
+        "--plasticity_smooth_weight",
+        type=float,
+        default=None,
+        help="Laplacian smoothness weight for per-spring yield/hardening fields (0 disables).",
+    )
+    parser.add_argument(
+        "--plasticity_init_noise",
+        type=float,
+        default=None,
+        help="Relative std for init noise on per-spring yield/hardening (e.g. 0.02).",
+    )
     parser.add_argument("--sim_method", type=str, default="spring_mass", choices=["spring_mass", "xpbd"])
     parser.add_argument("--chamfer_weight", type=float, default=None)
     parser.add_argument("--track_weight", type=float, default=None)
@@ -108,6 +120,12 @@ if __name__ == "__main__":
         cfg.track_weight = args.track_weight
     if args.acc_weight is not None:
         cfg.acc_weight = args.acc_weight
+
+    # Optional physically-motivated priors on per-spring plasticity fields
+    if args.plasticity_smooth_weight is not None:
+        cfg.plasticity_smooth_weight = args.plasticity_smooth_weight
+    if args.plasticity_init_noise is not None:
+        cfg.plasticity_init_noise = args.plasticity_init_noise
 
     cfg.comment = args.comment
 

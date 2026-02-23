@@ -29,6 +29,18 @@ if __name__ == "__main__":
     parser.add_argument("--base_path", type=str, required=True)
     parser.add_argument("--case_name", type=str, required=True)
     parser.add_argument("--enable_plasticity", action="store_true")
+    parser.add_argument(
+        "--plasticity_smooth_weight",
+        type=float,
+        default=None,
+        help="Optional smoothness regularization weight for per-spring plasticity params (kept for CLI compatibility with training).",
+    )
+    parser.add_argument(
+        "--plasticity_init_noise",
+        type=float,
+        default=None,
+        help="Optional symmetry-breaking init noise scale for per-spring plasticity params (kept for CLI compatibility with training).",
+    )
     parser.add_argument("--enable_breakage", action="store_true")
     parser.add_argument("--break_strain", type=float, default=None)
     args = parser.parse_args()
@@ -78,6 +90,13 @@ if __name__ == "__main__":
 
     if args.enable_plasticity:
         cfg.enable_plasticity = True
+    # Keep these flags accepted during inference so pipeline scripts can forward
+    # them; they may still affect any regularization / init-time behavior in the
+    # trainer/simulator depending on implementation.
+    if args.plasticity_smooth_weight is not None:
+        cfg.plasticity_smooth_weight = args.plasticity_smooth_weight
+    if args.plasticity_init_noise is not None:
+        cfg.plasticity_init_noise = args.plasticity_init_noise
     if args.enable_breakage:
         cfg.enable_breakage = True
     if args.break_strain is not None:
