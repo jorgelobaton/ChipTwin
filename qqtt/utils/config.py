@@ -74,6 +74,23 @@ class Config:
         self.enable_plasticity = False
         self.sim_method = "spring_mass"  # Options: "spring_mass", "xpbd"
 
+        # ── GNN World Model ───────────────────────────────────────
+        self.use_gnn_world_model = False
+        self.gnn_generate_data = False
+        self.gnn_num_trajectories = 500
+        self.gnn_output_dir = "data/gnn/"
+        self.gnn_train = False
+        self.gnn_data_dir = "data/gnn/"
+        self.gnn_checkpoint_dir = "checkpoints/gnn/"
+        self.gnn_epochs = 100
+        self.gnn_lr = 1e-4
+        self.gnn_message_passing_steps = 10
+        self.gnn_hidden_dim = 128
+        self.gnn_online_finetune = False
+        self.gnn_finetune_frames = 10
+        self.gnn_finetune_steps = 20
+        self.gnn_finetune_lr = 1e-3
+
     def to_dict(self):
         # Convert the class to dictionary
         return {

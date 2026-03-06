@@ -19,6 +19,8 @@ parser.add_argument("--normal", action="store_true", help="Evaluate normal varia
 parser.add_argument("--plasticity", action="store_true", help="Evaluate plasticity variant")
 parser.add_argument("--breakage", action="store_true", help="Evaluate breakage variant")
 parser.add_argument("--case_name", type=str, default="", help="Evaluate only a specific case (by name) instead of all cases in data_config.csv")
+parser.add_argument("--gnn", action="store_true", help="Evaluate GNN inference (reads inference_gnn.pkl)")
+parser.add_argument("--gnn_finetuned", action="store_true", help="Evaluate GNN fine-tuned inference (reads inference_gnn_finetuned.pkl)")
 
 def evaluate_prediction(start_frame, end_frame, vertices, gt_track_3d, idx, mask):
     track_errors = []
@@ -36,15 +38,15 @@ def evaluate_prediction(start_frame, end_frame, vertices, gt_track_3d, idx, mask
     return np.mean(track_errors)
 
 
-def evaluate_case(case_name, exp_dir):
+def evaluate_case(case_name, exp_dir, inference_filename="inference.pkl"):
     """Evaluate a single experiment directory. Returns (train_error, test_error) or None if missing files."""
-    inference_path = f"{exp_dir}/inference.pkl"
+    inference_path = f"{exp_dir}/{inference_filename}"
     gt_track_path = f"{base_path}/{case_name}/gt_track_3d.pkl"
     track_process_path = f"{base_path}/{case_name}/track_process_data.pkl"
     split_path = f"{base_path}/{case_name}/split.json"
 
     if not os.path.exists(inference_path):
-        print(f"  Skipping {exp_dir}: inference.pkl not found")
+        print(f"  Skipping {exp_dir}: {inference_filename} not found")
         return None
     if not os.path.exists(split_path):
         print(f"  Skipping {exp_dir}: split.json not found")
@@ -95,6 +97,14 @@ def evaluate_case(case_name, exp_dir):
 if __name__ == "__main__":
     args = parser.parse_args()
 
+    # Determine inference filename based on --gnn / --gnn_finetuned
+    if args.gnn_finetuned:
+        inference_filename = "inference_gnn_finetuned.pkl"
+    elif args.gnn:
+        inference_filename = "inference_gnn.pkl"
+    else:
+        inference_filename = "inference.pkl"
+
     if not (args.normal or args.plasticity or args.breakage):
         args.normal = True
         args.plasticity = True
@@ -134,7 +144,7 @@ if __name__ == "__main__":
 
         for variant_name, suffix in variants_to_run:
             exp_dir = f"{prediction_path}/{case_name}{suffix}"
-            result = evaluate_case(case_name, exp_dir)
+            result = evaluate_case(case_name, exp_dir, inference_filename=inference_filename)
             if result is not None:
                 train_err, test_err = result
                 writer.writerow([case_name, variant_name, train_err, test_err])

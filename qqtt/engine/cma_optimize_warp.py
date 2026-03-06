@@ -417,6 +417,9 @@ class OptimizerCMA:
             max_stretch_ratio=cfg.max_stretch_ratio,
         )
 
+        # Tell the simulator the number of object-object springs for chunk connectivity
+        self.simulator.set_num_object_springs(self.num_object_springs)
+
         self.simulator.set_init_state(
             self.simulator.wp_init_vertices, self.simulator.wp_init_velocities
         )

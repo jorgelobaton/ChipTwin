@@ -1,0 +1,20 @@
+2026-02-24 19:32:09,611 [   INFO] [DATA]: loading data from ./data/different_types/demo_63/final_data.pkl
+2026-02-24 19:32:19,092 [   INFO] [CMA Params] spring_Y=30000.0, drag=3.00, dashpot=100.0, ctrl_r=0.0600, ctrl_nn=50, obj_r=0.0200, vel_retained/frame=0.905
+2026-02-24 19:32:19,261 [   INFO] [SIMULATION]: Initialize the Spring-Mass System
+2026-02-24 19:32:20,833 [   INFO] Module qqtt.model.diff_simulator.spring_mass_warp de5be90 load on device 'cuda:0' took 1484.96 ms  (compiled)
+2026-02-24 19:32:20,944 [  ERROR] Traceback (most recent call last):
+  File "/home/leo/Desktop/Jorge/ChipTwin/optimize_cma.py", line 131, in <module>
+    optimizer.optimize(max_iter=max_iter)
+  File "/home/leo/Desktop/Jorge/ChipTwin/qqtt/engine/cma_optimize_warp.py", line 251, in optimize
+    self.error_func(
+  File "/home/leo/Desktop/Jorge/ChipTwin/qqtt/engine/cma_optimize_warp.py", line 437, in error_func
+    self.simulator.set_num_object_springs(self.num_object_springs)
+AttributeError: 'SpringMassSystemWarp' object has no attribute 'set_num_object_springs'. Did you mean: 'num_object_points'? (logger.py:156)
+[INFO] train_frame not provided, read from split.json: 131
+
+[STEP 0 / 0.5] Skipping export_gaussian_data + gs_train (use --run_gs to enable).
+
+
+[STEP 1] Running: python optimize_cma.py --base_path ./data/different_types --case_name demo_63 --train_frame 131 --max_iter 20 --enable_plasticity --enable_breakage
+
+[ERROR] optimize_cma.py failed with exit code 256. Aborting.

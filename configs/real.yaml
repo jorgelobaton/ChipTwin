@@ -30,3 +30,20 @@ acc_weight: 0.01
 yield_strain: 0.05
 hardening_factor: 0.3
 # enable_breakage: true
+
+# ── GNN World Model ───────────────────────────────────────
+use_gnn_world_model: false       # Master switch; if false, nothing below applies
+gnn_generate_data: false         # Run data generation from Warp simulator
+gnn_num_trajectories: 500        # Number of synthetic trajectories to generate
+gnn_output_dir: "data/gnn/"      # Where to save generated trajectory data
+gnn_train: false                 # Run offline GNN training
+gnn_data_dir: "data/gnn/"        # Where to read training data from
+gnn_checkpoint_dir: "checkpoints/gnn/"  # Where to save/load GNN weights
+gnn_epochs: 100                  # GNN training epochs
+gnn_lr: 1.0e-4                   # GNN training learning rate
+gnn_message_passing_steps: 10    # Number of GNN processor steps
+gnn_hidden_dim: 128              # Hidden dimension for all MLPs
+gnn_online_finetune: false       # Run online fine-tuning for unseen chip
+gnn_finetune_frames: 10          # Number of live frames to use for fine-tuning
+gnn_finetune_steps: 20           # Gradient steps per frame during fine-tuning
+gnn_finetune_lr: 1.0e-3          # Learning rate for physical param fine-tuning

@@ -55,12 +55,14 @@ if __name__ == "__main__":
         "--virtual_key_input", action="store_true", help="use virtual key input"
     )
     parser.add_argument(
-        "--show_forces", action="store_true", help="visualize contact force arrows in real-time"
-    )
-    parser.add_argument(
         "--force_scale", type=float, default=30000, help="scale factor for force arrow visualization"
     )
+    parser.add_argument(
+        "--max_stretch_ratio", type=float, default=None, help="max spring stretch ratio (e.g. 3.0 = 3x rest length)"
+    )
     parser.add_argument("--enable_plasticity", action="store_true")
+    parser.add_argument("--enable_breakage", action="store_true")
+    parser.add_argument("--break_strain", type=float, default=None)
     args = parser.parse_args()
 
     base_path = args.base_path
@@ -73,8 +75,15 @@ if __name__ == "__main__":
 
     base_dir = f"./temp_experiments/{case_name}"
 
+    # Build experiment directory suffix based on enabled features
+    suffix = ""
+    if args.enable_plasticity:
+        suffix += "_ep"
+    if args.enable_breakage:
+        suffix += "_brk"
+
     # Read the first-satage optimized parameters to set the indifferentiable parameters
-    optimal_path = f"./experiments_optimization/{case_name}_ep/optimal_params.pkl" if args.enable_plasticity else f"./experiments_optimization/{case_name}/optimal_params.pkl"
+    optimal_path = f"./experiments_optimization/{case_name}{suffix}/optimal_params.pkl"
     logger.info(f"Load optimal parameters from: {optimal_path}")
     assert os.path.exists(
         optimal_path
@@ -96,6 +105,12 @@ if __name__ == "__main__":
     cfg.bg_img_path = args.bg_img_path
     if args.enable_plasticity:
         cfg.enable_plasticity = True
+    if args.enable_breakage:
+        cfg.enable_breakage = True
+    if args.break_strain is not None:
+        cfg.break_strain = args.break_strain
+    if args.max_stretch_ratio is not None:
+        cfg.max_stretch_ratio = args.max_stretch_ratio
 
     gaussians_path = None
     if not args.no_gaussian_rendering:
@@ -115,7 +130,7 @@ if __name__ == "__main__":
         pure_inference_mode=True,
     )
 
-    best_model_path = glob.glob(f"experiments/{case_name}/train/best_*.pth")[0]
+    best_model_path = glob.glob(f"experiments/{case_name}{suffix}/train/best_*.pth")[0]
     trainer.interactive_playground(
         best_model_path,
         gaussians_path,
@@ -123,6 +138,6 @@ if __name__ == "__main__":
         args.inv_ctrl,
         virtual_key_input=args.virtual_key_input,
         use_gaussians=not args.no_gaussian_rendering,
-        show_forces=args.show_forces,
         force_scale=args.force_scale,
+        case_name=case_name,
     )
