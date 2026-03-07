@@ -1,14 +1,24 @@
 import cv2
 import numpy as np
 from PIL import Image  # Requires: pip install pillow
+import json
+import os
+
+# Compute paths relative to this script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+calibration_path = os.path.join(script_dir, "..", "cams", "calibration.json")
+
+with open(calibration_path, "r") as f:
+    calib_data = json.load(f)
+
 
 def generate_exact_charuco():
     # 1. Configuration
-    squares_x = 4
-    squares_y = 5
-    square_length_mm = 50  # 50mm
-    margin_mm = 0         # 10mm margins (safer for printing)
-    target_dpi = 300       # Standard print resolution
+    squares_x = calib_data["squares_x"]
+    squares_y = calib_data["squares_y"]
+    square_length_mm = calib_data["square_length_mm"]
+    margin_mm = calib_data["margin_mm"]
+    target_dpi = calib_data["target_dpi"]
     
     # 2. Calculate Exact Pixel Dimensions
     # Formula: pixels = (mm / 25.4) * dpi
@@ -30,7 +40,7 @@ def generate_exact_charuco():
     board = cv2.aruco.CharucoBoard(
         (squares_x, squares_y),
         squareLength=square_length_mm/1000, 
-        markerLength=0.037, 
+        markerLength=calib_data["markerLength"],
         dictionary=dictionary
     )
     
@@ -43,7 +53,7 @@ def generate_exact_charuco():
     
     # 5. Save with DPI Metadata
     # cv2.imwrite() discards DPI. We use Pillow to save it correctly.
-    output_filename = "charuco_300dpi.png"
+    output_filename = f"charuco_{squares_x}x{squares_y}_{target_dpi}dpi.png"
     pil_image = Image.fromarray(img)
     pil_image.save(output_filename, dpi=(target_dpi, target_dpi))
     

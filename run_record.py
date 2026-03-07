@@ -18,6 +18,25 @@ import queue
 import threading
 import shutil
 
+try:
+    import rospy
+    from geometry_msgs.msg import WrenchStamped
+    HAS_ROS = True
+except ImportError:
+    HAS_ROS = False
+
+latest_force = None
+force_lock = threading.Lock()
+
+def force_callback(msg):
+    global latest_force
+    with force_lock:
+        latest_force = {
+            "time": msg.header.stamp.to_sec(),
+            "force": [msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z],
+            "torque": [msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z]
+        }
+
 # Import Local Camera Classes
 from cams.camera_d405 import D405Camera
 # from camera_kinect import KinectCamera  # Moved to try/except block above
@@ -136,6 +155,17 @@ def main(args):
         print("[FAIL] No cameras found.")
         return
 
+    # Initialize ROS Node for Force
+    global HAS_ROS
+    if HAS_ROS:
+        try:
+            rospy.init_node('force_recorder', anonymous=True, disable_signals=True)
+            rospy.Subscriber('/force', WrenchStamped, force_callback)
+            print("[INFO] ROS initialized. Subscribed to /force.")
+        except Exception as e:
+            print(f"[WARN] Failed to initialize ROS: {e}")
+            HAS_ROS = False
+
     # 1b. Start per-camera capture threads
     # Each thread runs get_frame() continuously so the main loop never blocks.
     cam_latest = {}   # cid -> [latest (depth, color)] (list so we can mutate in-place)
@@ -215,6 +245,9 @@ def main(args):
     timed_state = 0 # 0: Idle, 1: Countdown, 2: Recording
     timer_start_ts = 0.0
 
+    # Recorded forces
+    recorded_forces = []
+
     # FPS tracking
     fps_window = 60  # rolling window size (frames)
     frame_timestamps = []   # timestamps of captured main-loop iterations
@@ -269,6 +302,13 @@ def main(args):
                 if len(record_timestamps) >= 2:
                     elapsed = record_timestamps[-1] - record_timestamps[0]
                     record_fps = (len(record_timestamps) - 1) / elapsed if elapsed > 0 else 0.0
+
+                current_force = None
+                if HAS_ROS:
+                    with force_lock:
+                        if latest_force is not None:
+                            current_force = dict(latest_force)
+                recorded_forces.append(current_force)
 
                 for cid in camera_ids:
                     d, c = frames[cid]
@@ -365,6 +405,12 @@ def main(args):
         metadata["real_fps"] = round(real_fps, 2)
         with open(f"{output_dir}/metadata.json", "w") as f:
             json.dump(metadata, f, indent=4)
+
+        if HAS_ROS and len(recorded_forces) > 0:
+            force_path = f"{output_dir}/force.json"
+            with open(force_path, "w") as f:
+                json.dump(recorded_forces, f, indent=4)
+            print(f"Saved force data to {force_path}")
 
         # Copy Calibration
         if os.path.exists("calibrate.pkl"):

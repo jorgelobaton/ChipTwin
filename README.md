@@ -108,3 +108,26 @@ python interactive_playground.py \
 --case_name <demo_folder> \
 --enable_plasticity
 ```
+
+Terminal 1
+```zsh
+sudo chmod 666 /dev/ttyUSB1
+source /home/leo/keio_amr_real-main/devel/setup.zsh
+roslaunch dynpick_driver driver-calibration.launch device:=/dev/ttyUSB1
+```
+
+Terminal 2
+```zsh
+source /home/leo/keio_amr_real-main/devel/setup.zsh
+rqt_plot
+```
+
+Terminal 3
+```zsh
+source /home/leo/keio_amr_real-main/devel/setup.zsh
+python run_record.py --output_dir OUTPUT_DIR
+```
+
+```zsh
+rostopic echo /force
+```

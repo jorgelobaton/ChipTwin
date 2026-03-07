@@ -1,0 +1,8 @@
+{
+    "squares_x": 4,
+    "squares_y": 5,
+    "square_length_mm": 25,
+    "margin_mm": 0,         
+    "target_dpi": 150,
+    "markerLength": 0.0185
+}

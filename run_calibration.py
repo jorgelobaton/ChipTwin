@@ -12,6 +12,9 @@ from cams.camera_kinect import KinectCamera
 import pyrealsense2 as rs
 from pyk4a import connected_device_count
 
+with open("cams/calibration.json", "r") as f:
+    calib_data = json.load(f)
+
 # ==============================================================================
 # DISCOVERY HELPER
 # ==============================================================================
@@ -100,10 +103,10 @@ class CalibrationSystem:
 
         # 2. Setup ChArUco
         # Matching your reference parameters exactly
-        squares_x = 4
-        squares_y = 5
-        square_length = 0.05
-        marker_length = 0.037
+        squares_x = calib_data["squares_x"]
+        squares_y = calib_data["squares_y"]
+        square_length = calib_data["square_length_mm"] / 1000  # Convert mm to meters
+        marker_length = calib_data["markerLength"]
         self.dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.board = cv2.aruco.CharucoBoard((squares_x, squares_y), square_length, marker_length, self.dictionary)
         self.detector = cv2.aruco.CharucoDetector(self.board)
