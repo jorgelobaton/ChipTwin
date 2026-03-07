@@ -163,27 +163,27 @@ def run():
         config_file = args.config
         if not config_file:
              # Try map lookup
-             if os.path.exists("camera_map.json"):
+             if os.path.exists("cams/camera_map.json"):
                 try:
-                    with open("camera_map.json", 'r') as f:
+                    with open("cams/camera_map.json", 'r') as f:
                         cmap = json.load(f)
-                        config_file = cmap.get(args.serial, "config_d405.json")
-                except: config_file = "config_d405.json"
+                        config_file = cmap.get(args.serial, "cams/config_d405.json")
+                except: config_file = "cams/config_d405.json"
              else:
-                 config_file = "config_d405.json"
+                 config_file = "cams/config_d405.json"
         
         run_camera(args.serial, config_file)
         return
 
-    # Mode 2: Iterate through camera_map.json
-    if not os.path.exists("camera_map.json"):
-        print("[ERR] camera_map.json not found, and no serial provided.")
-        print("Please provide --serial OR create camera_map.json")
+    # Mode 2: Iterate through cams/camera_map.json
+    if not os.path.exists("cams/camera_map.json"):
+        print("[ERR] cams/camera_map.json not found, and no serial provided.")
+        print("Please provide --serial OR create cams/camera_map.json")
         return
 
-    print("[INFO] Loading camera_map.json...")
+    print("[INFO] Loading cams/camera_map.json...")
     try:
-        with open("camera_map.json", 'r') as f:
+        with open("cams/camera_map.json", 'r') as f:
             cmap = json.load(f)
     except Exception as e:
         print(f"[ERR] Failed to load map: {e}")
@@ -194,6 +194,9 @@ def run():
     
     for serial in serials:
         config_file = cmap[serial]
+        # If not found at provided path, check under cams/
+        if not os.path.exists(config_file) and os.path.exists(os.path.join("cams", config_file)):
+            config_file = os.path.join("cams", config_file)
         print(f"\n>>> NEXT CAMERA: {serial} (Config: {config_file})")
         should_continue = run_camera(serial, config_file)
         if not should_continue:

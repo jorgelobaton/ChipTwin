@@ -26,6 +26,11 @@ parser.add_argument("--manual_controller_mask", action="store_true", default=Fal
 parser.add_argument("--manual_object_mask", action="store_true", default=False,
                     help="Use interactive manual segmentation for the target object instead of GroundingDINO.")
 parser.add_argument("--shape_prior", action="store_true", default=False)
+parser.add_argument("--tool_mesh", type=str, default=None,
+                    help="Path to a watertight tool mesh (PLY/GLB) produced by capture_tool.py. "
+                         "Its volume will be subtracted from the final reconstructed chip point cloud.")
+parser.add_argument("--tool_scale", type=float, default=1.0,
+                    help="Uniform scale factor for the tool mesh before subtraction (e.g. 2.0 = 2x).")
 args = parser.parse_args()
 
 # Set the debug flagspython process_data.py --base_path ./data/different_types --case_name demo_cable --category cable --controller hand --manual_segment
@@ -43,6 +48,8 @@ CONTROLLER_NAME = args.controller
 MANUAL_CONTROLLER_MASK = args.manual_controller_mask
 MANUAL_OBJECT_MASK = args.manual_object_mask
 ANY_MANUAL = MANUAL_CONTROLLER_MASK or MANUAL_OBJECT_MASK
+TOOL_MESH = args.tool_mesh
+TOOL_SCALE = args.tool_scale
 
 # Build TEXT_PROMPT based on what's being auto-segmented
 if not ANY_MANUAL:
@@ -180,13 +187,14 @@ if PROCESS_ALIGN and SHAPE_PRIOR:
 if PROCESS_FINAL:
     # Get the final PCD used for the inverse physics with/without the shape prior
     with Timer("Final Data Generation"):
+        tool_flag = f" --tool_mesh {TOOL_MESH} --tool_scale {TOOL_SCALE}" if TOOL_MESH else ""
         if SHAPE_PRIOR:
             os.system(
-                f"python ./data_process/data_process_sample.py --base_path {base_path} --case_name {case_name} --shape_prior"
+                f"python ./data_process/data_process_sample.py --base_path {base_path} --case_name {case_name} --shape_prior{tool_flag}"
             )
         else:
             os.system(
-                f"python ./data_process/data_process_sample.py --base_path {base_path} --case_name {case_name}"
+                f"python ./data_process/data_process_sample.py --base_path {base_path} --case_name {case_name}{tool_flag}"
             )
 
     # Save the train test split
