@@ -10,6 +10,7 @@ except ImportError:
 
 import time
 import os
+import sys
 import cv2
 import numpy as np
 import json
@@ -17,6 +18,11 @@ from argparse import ArgumentParser
 import queue
 import threading
 import shutil
+
+# Make ROS packages available when running from a conda/venv environment
+_ROS_PYTHON_PATH = "/opt/ros/noetic/lib/python3/dist-packages"
+if _ROS_PYTHON_PATH not in sys.path:
+    sys.path.insert(0, _ROS_PYTHON_PATH)
 
 try:
     import rospy
@@ -30,11 +36,17 @@ force_lock = threading.Lock()
 
 def force_callback(msg):
     global latest_force
+    # Transform from sensor frame to calibration/pipeline frame:
+    #   pipeline_x = sensor_y
+    #   pipeline_y = sensor_z
+    #   pipeline_z = sensor_x
+    fx, fy, fz = msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z
+    tx, ty, tz = msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z
     with force_lock:
         latest_force = {
             "time": msg.header.stamp.to_sec(),
-            "force": [msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z],
-            "torque": [msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z]
+            "force": [fy, fz, fx],
+            "torque": [ty, tz, tx]
         }
 
 # Import Local Camera Classes
@@ -161,6 +173,10 @@ def main(args):
         try:
             rospy.init_node('force_recorder', anonymous=True, disable_signals=True)
             rospy.Subscriber('/force', WrenchStamped, force_callback)
+            # Spin in a background thread so callbacks are processed while the
+            # main loop is busy with cv2.waitKey (without this, callbacks never fire)
+            ros_spin_thread = threading.Thread(target=rospy.spin, daemon=True)
+            ros_spin_thread.start()
             print("[INFO] ROS initialized. Subscribed to /force.")
         except Exception as e:
             print(f"[WARN] Failed to initialize ROS: {e}")
