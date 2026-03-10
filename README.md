@@ -56,6 +56,38 @@ pip install --no-build-isolation /tmp/diffoctreerast
 git clone https://github.com/autonomousvision/mip-splatting.git /tmp/mip-splatting
 pip install --no-build-isolation /tmp/mip-splatting/submodules/diff-gaussian-rasterization/
 ```
+## Record Data
+
+Terminal 1
+```zsh
+sudo chmod 666 /dev/ttyUSB1
+source /home/leo/keio_amr_real-main/devel/setup.zsh
+roslaunch dynpick_driver driver-calibration.launch device:=/dev/ttyUSB1
+```
+
+Terminal 2
+```zsh
+source /home/leo/keio_amr_real-main/devel/setup.zsh
+rqt_plot
+```
+
+Terminal 3
+```zsh
+source /home/leo/keio_amr_real-main/devel/setup.zsh
+python run_record.py --output_dir OUTPUT_DIR
+```
+
+```zsh
+rostopic echo /force
+```
+
+```zsh
+python run_calibration.py
+python run_record.py --output_dir OUTPUT_DIR_NAME
+```
+
+
+
 
 ### Data Processing from Raw Videos
 The original data in each case only includes `color`, `depth`, `calibrate.pkl`, `metadata.json`. All other data are processed as below to get, including the projection, tracking and shape priors.
@@ -109,25 +141,3 @@ python interactive_playground.py \
 --enable_plasticity
 ```
 
-Terminal 1
-```zsh
-sudo chmod 666 /dev/ttyUSB1
-source /home/leo/keio_amr_real-main/devel/setup.zsh
-roslaunch dynpick_driver driver-calibration.launch device:=/dev/ttyUSB1
-```
-
-Terminal 2
-```zsh
-source /home/leo/keio_amr_real-main/devel/setup.zsh
-rqt_plot
-```
-
-Terminal 3
-```zsh
-source /home/leo/keio_amr_real-main/devel/setup.zsh
-python run_record.py --output_dir OUTPUT_DIR
-```
-
-```zsh
-rostopic echo /force
-```
